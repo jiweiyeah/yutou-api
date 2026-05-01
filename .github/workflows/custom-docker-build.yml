@@ -1,0 +1,116 @@
+name: Custom — Build & push Docker image
+
+# Manually-triggered Docker build for this fork.
+# Defaults to building the `custom` branch (per CLAUDE.md Rule 8).
+# Pushes to GitHub Container Registry (ghcr.io) — no extra secrets needed,
+# uses the built-in GITHUB_TOKEN.
+#
+# Image will be published as:
+#   ghcr.io/<owner>/<repo>:<tag>
+# e.g. ghcr.io/jiweiyeah/yutou-api:latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit SHA to build'
+        required: true
+        type: string
+        default: 'custom'
+      tag:
+        description: 'Image tag (e.g. latest, v1.0.0, dev)'
+        required: true
+        type: string
+        default: 'latest'
+      platforms:
+        description: 'Target platforms (comma-separated)'
+        required: true
+        type: string
+        default: 'linux/amd64,linux/arm64'
+      push:
+        description: 'Push to registry (uncheck for build-only smoke test)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: custom-docker-build-${{ inputs.ref }}-${{ inputs.tag }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr requires lowercase image names; we lowercase repo at runtime.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build & push (${{ inputs.tag }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ${{ inputs.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          name="${IMAGE_NAME,,}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=${{ inputs.tag }}
+            type=raw,value=${{ inputs.ref }}-${{ github.run_number }}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        run: |
+          {
+            echo "### Docker build complete"
+            echo ""
+            echo "- **Source ref:** \`${{ inputs.ref }}\`"
+            echo "- **Pushed:** \`${{ inputs.push }}\`"
+            echo "- **Platforms:** \`${{ inputs.platforms }}\`"
+            echo ""
+            echo "**Tags published:**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
