@@ -10,9 +10,9 @@ name: Custom — Sync upstream
 
 on:
   schedule:
-    # Daily at 18:17 UTC (≈ 02:17 next-day Beijing time, off-peak).
+    # Every Friday at 11:07 UTC = Friday 19:07 Beijing time (UTC+8).
     # Off-the-:00 minute on purpose to avoid the cron herd.
-    - cron: '17 18 * * *'
+    - cron: '7 11 * * 5'
   workflow_dispatch:
     inputs:
       merge_into_custom:
