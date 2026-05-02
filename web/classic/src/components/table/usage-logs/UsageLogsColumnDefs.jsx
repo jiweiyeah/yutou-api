@@ -23,7 +23,6 @@ import {
   Space,
   Tag,
   Tooltip,
-  Popover,
   Typography,
 } from '@douyinfe/semi-ui';
 import {
@@ -36,7 +35,7 @@ import {
   renderTieredModelPriceSimple,
 } from '../../../helpers';
 import { IconHelpCircle } from '@douyinfe/semi-icons';
-import { CircleAlert, Route, Sparkles } from 'lucide-react';
+import { CircleAlert, Sparkles } from 'lucide-react';
 
 const colors = [
   'amber',
@@ -270,66 +269,17 @@ function renderBillingTag(record, t) {
 }
 
 function renderModelName(record, copyText, t) {
-  let other = getLogOther(record.other);
-  let modelMapped =
-    other?.is_model_mapped &&
-    other?.upstream_model_name &&
-    other?.upstream_model_name !== '';
-  if (!modelMapped) {
-    return renderModelTag(record.model_name, {
-      onClick: (event) => {
-        copyText(event, record.model_name).then((r) => {});
-      },
-    });
-  } else {
-    return (
-      <>
-        <Space vertical align={'start'}>
-          <Popover
-            content={
-              <div style={{ padding: 10 }}>
-                <Space vertical align={'start'}>
-                  <div className='flex items-center'>
-                    <Typography.Text strong style={{ marginRight: 8 }}>
-                      {t('请求并计费模型')}:
-                    </Typography.Text>
-                    {renderModelTag(record.model_name, {
-                      onClick: (event) => {
-                        copyText(event, record.model_name).then((r) => {});
-                      },
-                    })}
-                  </div>
-                  <div className='flex items-center'>
-                    <Typography.Text strong style={{ marginRight: 8 }}>
-                      {t('实际模型')}:
-                    </Typography.Text>
-                    {renderModelTag(other.upstream_model_name, {
-                      onClick: (event) => {
-                        copyText(event, other.upstream_model_name).then(
-                          (r) => {},
-                        );
-                      },
-                    })}
-                  </div>
-                </Space>
-              </div>
-            }
-          >
-            {renderModelTag(record.model_name, {
-              onClick: (event) => {
-                copyText(event, record.model_name).then((r) => {});
-              },
-              suffixIcon: (
-                <Route
-                  style={{ width: '0.9em', height: '0.9em', opacity: 0.75 }}
-                />
-              ),
-            })}
-          </Popover>
-        </Space>
-      </>
-    );
-  }
+  // ===== CUSTOM START: hide actual (upstream) model from clients =====
+  // Originally rendered a Popover exposing both `record.model_name` (request)
+  // and `other.upstream_model_name` (post-redirect upstream) when the channel
+  // had a model mapping. We always render only the requested model name —
+  // clients should never see the upstream/redirected model name.
+  return renderModelTag(record.model_name, {
+    onClick: (event) => {
+      copyText(event, record.model_name).then((r) => {});
+    },
+  });
+  // ===== CUSTOM END =====
 }
 
 function toTokenNumber(value) {

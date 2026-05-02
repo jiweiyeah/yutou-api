@@ -804,21 +804,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
               />
             )}
 
-            {/* Model mapping */}
-            {other?.is_model_mapped && other?.upstream_model_name && (
-              <DetailSection label={t('Model Mapping')}>
-                <DetailRow
-                  label={t('Request Model')}
-                  value={props.log.model_name}
-                  mono
-                />
-                <DetailRow
-                  label={t('Actual Model')}
-                  value={other.upstream_model_name}
-                  mono
-                />
-              </DetailSection>
-            )}
+            {/* ===== CUSTOM START: hide actual (upstream) model from log details =====
+                Originally a "Model Mapping" section here rendered "Request Model"
+                and "Actual Model" rows. Removed so clients only see the model
+                name they requested, never the post-redirect upstream model.
+                ===== CUSTOM END ===== */}
 
             {/* Token breakdown (for consume/error types with token data) */}
             {isDisplayableType(props.log.type) && other && (

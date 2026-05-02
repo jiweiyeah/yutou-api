@@ -448,20 +448,11 @@ export const useLogsData = () => {
         }
       }
       if (logs[i].type === 2) {
-        let modelMapped =
-          other?.is_model_mapped &&
-          other?.upstream_model_name &&
-          other?.upstream_model_name !== '';
-        if (modelMapped) {
-          expandDataLocal.push({
-            key: t('请求并计费模型'),
-            value: logs[i].model_name,
-          });
-          expandDataLocal.push({
-            key: t('实际模型'),
-            value: other.upstream_model_name,
-          });
-        }
+        // ===== CUSTOM START: hide actual (upstream) model from log details =====
+        // Originally pushed two rows ("请求并计费模型" + "实际模型") into the
+        // detail expansion when the channel applied a model mapping. Removed
+        // so clients see only the requested model name in log details.
+        // ===== CUSTOM END =====
 
         const isViolationFeeLog =
           other?.violation_fee === true ||

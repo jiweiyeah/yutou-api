@@ -149,7 +149,12 @@ export function formatModelName(log: UsageLog): {
   return {
     name: log.model_name,
     isMapped,
-    actualModel: isMapped ? other.upstream_model_name : undefined,
+    // ===== CUSTOM START: hide upstream/actual model from end-user logs UI =====
+    // Originally: actualModel: isMapped ? other.upstream_model_name : undefined
+    // Forcing undefined disables the model-badge popover that exposed the
+    // post-redirect upstream model name to the client.
+    actualModel: undefined,
+    // ===== CUSTOM END =====
   }
 }
 
