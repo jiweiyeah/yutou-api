@@ -57,6 +57,15 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
+      - name: Generate VERSION file
+        id: version
+        run: |
+          # 使用东八区日期生成 vYYYYMMDD 格式版本号
+          VERSION="v$(TZ=Asia/Shanghai date +%Y%m%d)"
+          echo "$VERSION" > VERSION
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Built VERSION = ${VERSION}"
+
       - name: Lowercase image name
         id: img
         run: |
@@ -106,6 +115,7 @@ jobs:
             echo "### Docker build complete"
             echo ""
             echo "- **Source ref:** \`${{ inputs.ref }}\`"
+            echo "- **Build version:** \`${{ steps.version.outputs.version }}\`"
             echo "- **Pushed:** \`${{ inputs.push }}\`"
             echo "- **Platforms:** \`${{ inputs.platforms }}\`"
             echo ""
