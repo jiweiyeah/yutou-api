@@ -4,9 +4,9 @@ name: Custom — Sync upstream
 #   - main is a pure mirror of upstream/main (fast-forward only).
 #   - custom holds our customizations and merges main into it.
 # This workflow runs on schedule and on demand. It updates main from
-# QuantumNous/new-api, then attempts to merge main into custom. If the
-# merge has conflicts, the workflow fails loudly so a human resolves it
-# locally — we never force-push or commit conflict markers.
+# QuantumNous/new-api, then merges main into custom. If the merge has
+# conflicts, the workflow fails loudly so a human resolves it locally —
+# we never force-push or commit conflict markers.
 
 on:
   schedule:
@@ -14,12 +14,6 @@ on:
     # Off-the-:00 minute on purpose to avoid the cron herd.
     - cron: '7 11 * * 5'
   workflow_dispatch:
-    inputs:
-      merge_into_custom:
-        description: 'Also merge main into custom (uncheck to only sync main)'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -40,10 +34,13 @@ jobs:
           # We need write access via the default GITHUB_TOKEN for pushes.
           persist-credentials: true
 
-      - name: Configure git identity
+      - name: Configure git identity and disambiguate remotes
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # When both origin/main and upstream/main exist, prefer origin
+          # for ambiguous short refs (defense in depth).
+          git config checkout.defaultRemote origin
 
       - name: Add upstream remote and fetch
         run: |
@@ -55,26 +52,24 @@ jobs:
         id: sync_main
         run: |
           set -euo pipefail
-          git checkout main
+          # Explicit -B avoids "matched multiple remote tracking branches"
+          # because both origin/main and upstream/main exist after fetch.
+          git checkout -B main origin/main
           # Fast-forward only — refuse to merge if histories diverged
           # (which would mean someone wrote on main, violating Rule 8).
           if ! git merge --ff-only upstream/main; then
             echo "::error::main has diverged from upstream/main. Someone committed on main — fix per CLAUDE.md Rule 8."
             exit 1
           fi
-          echo "behind_count=$(git rev-list --count HEAD..upstream/main)" >> "$GITHUB_OUTPUT"
-          echo "ahead_count=$(git rev-list --count origin/main..HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Push main
         run: git push origin main
 
       - name: Merge main into custom
-        if: ${{ github.event_name == 'schedule' || inputs.merge_into_custom }}
         id: merge_custom
         run: |
           set -euo pipefail
-          git checkout custom
-          git pull --ff-only origin custom
+          git checkout -B custom origin/custom
 
           new_commits=$(git rev-list --count custom..main)
           echo "Commits in main not yet in custom: $new_commits"
