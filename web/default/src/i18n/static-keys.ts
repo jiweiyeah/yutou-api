@@ -7,6 +7,7 @@ export const STATIC_I18N_KEYS = [
   'Pricing',
   'Docs',
   'About',
+  'Resources',
 
   // Workspace
   'System Settings',

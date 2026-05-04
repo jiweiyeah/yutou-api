@@ -85,7 +85,9 @@ export function useTopNavLinks(): TopNavLink[] {
 
   // About
   if (modules?.about !== false) {
-    links.push({ title: t('About'), href: '/about' })
+    // ===== CUSTOM START: rename top nav "About" label to "Resources" =====
+    links.push({ title: t('Resources'), href: '/about' })
+    // ===== CUSTOM END =====
   }
 
   return links
