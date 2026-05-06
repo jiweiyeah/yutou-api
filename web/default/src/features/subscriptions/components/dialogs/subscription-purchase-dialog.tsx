@@ -17,8 +17,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { GroupBadge } from '@/components/group-badge'
 import { Separator } from '@/components/ui/separator'
+import { GroupBadge } from '@/components/group-badge'
 import {
   paySubscriptionStripe,
   paySubscriptionCreem,
@@ -65,6 +65,11 @@ export function SubscriptionPurchaseDialog(props: Props) {
   const hasEpay =
     props.enableOnlineTopUp && (props.epayMethods || []).length > 0
   const hasAnyPayment = hasStripe || hasCreem || hasEpay
+  const selectedEpayMethodLabel =
+    (props.epayMethods || []).find((m) => m.type === selectedEpayMethod)
+      ?.name ||
+    selectedEpayMethod ||
+    t('Select payment method')
   const totalAmount = Number(plan.total_amount || 0)
   const price = Number(plan.price_amount || 0).toFixed(2)
   const limitReached =
@@ -266,11 +271,13 @@ export function SubscriptionPurchaseDialog(props: Props) {
                 <div className='grid grid-cols-[minmax(0,1fr)_auto] gap-2'>
                   <Select
                     value={selectedEpayMethod}
-                    onValueChange={setSelectedEpayMethod}
+                    onValueChange={(v) =>
+                      v !== null && setSelectedEpayMethod(v)
+                    }
                     disabled={limitReached}
                   >
                     <SelectTrigger className='flex-1'>
-                      <SelectValue placeholder={t('Select payment method')} />
+                      <SelectValue>{selectedEpayMethodLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {(props.epayMethods || []).map((m) => (
