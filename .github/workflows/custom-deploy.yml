@@ -1,0 +1,206 @@
+name: Custom — Build & deploy to server
+
+# Manually-triggered: build the image, push to GHCR, then SSH to the
+# production server and roll the running compose stack to the new image.
+#
+# Required GitHub Secrets:
+#   DEPLOY_SSH_KEY  — private key (ed25519) for the deploy user; full PEM block
+#   DEPLOY_HOST     — server hostname or IP (e.g. 154.202.118.95)
+#   DEPLOY_USER     — SSH user (e.g. root)
+#   DEPLOY_PATH     — directory on the server containing docker-compose.yml
+#                     (e.g. /opt/new-api)
+# Optional:
+#   DEPLOY_PORT     — SSH port (defaults to 22)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit SHA to build'
+        required: true
+        type: string
+        default: 'custom'
+      tag:
+        description: 'Image tag to publish AND deploy (e.g. latest, v20260516)'
+        required: true
+        type: string
+        default: 'latest'
+      platforms:
+        description: 'Target platforms (server is amd64; multi-arch slows the build)'
+        required: true
+        type: string
+        default: 'linux/amd64'
+      deploy:
+        description: 'Deploy to server after build (uncheck to build-only)'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: custom-deploy-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build & push (${{ inputs.tag }})
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.img.outputs.image }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout ${{ inputs.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Generate VERSION file
+        id: version
+        run: |
+          VERSION="v$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          echo "$VERSION" > VERSION
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          name="${IMAGE_NAME,,}"
+          echo "image=${REGISTRY}/${name}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.image }}
+          tags: |
+            type=raw,value=${{ inputs.tag }}
+            type=raw,value=${{ inputs.ref }}-${{ github.run_number }}
+            type=sha,format=short
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Build summary
+        run: |
+          {
+            echo "### Build complete"
+            echo "- ref: \`${{ inputs.ref }}\`"
+            echo "- version: \`${{ steps.version.outputs.version }}\`"
+            echo "- image: \`${{ steps.img.outputs.image }}:${{ inputs.tag }}\`"
+            echo ""
+            echo "**Tags:**"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy ${{ inputs.tag }} to server
+    needs: build
+    if: ${{ inputs.deploy }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Setup SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          PORT="${SSH_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "PORT=$PORT" >> "$GITHUB_ENV"
+
+      - name: Pull image and roll compose stack
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$PORT" "$SSH_USER@$SSH_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' IMAGE='$IMAGE' TAG='$TAG' bash -s" <<'REMOTE'
+          set -eo pipefail
+
+          cd "$DEPLOY_PATH"
+          echo "[deploy] working in $(pwd)"
+
+          # Idempotently point the new-api service at the requested image:tag.
+          # Matches `image: ghcr.io/<owner>/<repo>:<anything>` for our IMAGE.
+          ESC_IMG=$(printf '%s' "$IMAGE" | sed 's/[\/&]/\\&/g')
+          ESC_TAG=$(printf '%s' "$TAG"   | sed 's/[\/&]/\\&/g')
+          sed -i.bak -E "s|(image:[[:space:]]*)${ESC_IMG}:[^[:space:]]+|\1${ESC_IMG}:${ESC_TAG}|" docker-compose.yml
+          echo "[deploy] effective image line:"
+          grep -E "^[[:space:]]*image:[[:space:]]*${ESC_IMG}" docker-compose.yml || true
+
+          echo "[deploy] docker compose pull..."
+          docker compose pull
+
+          echo "[deploy] docker compose up -d --remove-orphans..."
+          docker compose up -d --remove-orphans
+
+          echo "[deploy] waiting for new-api healthy (max 3 min)..."
+          status="starting"
+          for i in $(seq 1 36); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' new-api 2>/dev/null || echo missing)
+            echo "  [$i/36] new-api -> $status"
+            [ "$status" = "healthy" ] && break
+            sleep 5
+          done
+
+          if [ "$status" != "healthy" ]; then
+            echo "[deploy] ERROR: new-api never became healthy"
+            docker logs --tail 120 new-api || true
+            exit 1
+          fi
+
+          echo "[deploy] pruning dangling images..."
+          docker image prune -f >/dev/null
+
+          echo "[deploy] done. current state:"
+          docker compose ps
+          REMOTE
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy result: ${{ job.status }}"
+            echo "- image: \`${IMAGE}:${TAG}\`"
+            echo "- host: \`${{ secrets.DEPLOY_HOST }}\`"
+            echo "- path: \`${{ secrets.DEPLOY_PATH }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
