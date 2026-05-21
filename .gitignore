@@ -35,3 +35,10 @@ data/
 .test
 token_estimator_test.go
 skills-lock.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Local token batch input (contains real sk-... keys)
+bin/tokens.txt

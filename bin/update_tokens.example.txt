@@ -1,0 +1,18 @@
+# tokens.txt — update_tokens.py 输入示例
+#
+# 每行一条记录，用空白分隔（空格或制表符都可以）。# 后面是注释。
+# 格式: <KEY>  <EXPIRE>  <QUOTA>
+#
+# EXPIRE 关键字（不区分大小写）: never / forever / 永久 / 无期限 / -1 / -
+# QUOTA  关键字（不区分大小写）: unlimited / 无限 / 无限额 / -1 / -
+#
+# QUOTA 写数字时单位是 "美元"，脚本会乘以 QuotaPerUnit (默认 500000) 写入 remain_quota，
+# 并把 unlimited_quota 置为 false。
+# 写关键字时则把 unlimited_quota 置为 true，remain_quota 清零。
+
+# === 示例 ===
+sk-abc123def456ghi789xxx                  2026-04-21 16:29:19   50
+sk-zzz000aaa111bbb222yyy                  2026-12-31            100
+sk-pqq888rrr999sss000www                  never                 unlimited
+sk-mmmnnnoooppp                           永久                  无限
+sk-tobesetonly-expire                     2027-01-01 00:00:00   10
