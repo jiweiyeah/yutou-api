@@ -150,6 +150,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     getFacetedRowModel: getFacetedRowModel(),
     getFacetedUniqueValues: getFacetedUniqueValues(),
     manualPagination: true,
+    // Column filters (model_name/token_name/username/channel/group) are sent
+    // to the backend via buildApiParams. Disable client-side filtering —
+    // otherwise rows would be matched against react-table column IDs that
+    // don't line up with the actual log fields (e.g. `channel` vs
+    // `channel_id`), dropping rows the backend already matched.
+    manualFiltering: true,
     pageCount: Math.ceil((data?.total || 0) / pagination.pageSize),
   })
 

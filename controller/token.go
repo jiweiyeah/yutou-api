@@ -49,10 +49,15 @@ func SearchTokens(c *gin.Context) {
 	userId := c.GetInt("id")
 	keyword := c.Query("keyword")
 	token := c.Query("token")
+	// ===== CUSTOM START: support generic `q` param matching name OR key =====
+	q := c.Query("q")
+	// ===== CUSTOM END =====
 
 	pageInfo := common.GetPageQuery(c)
 
-	tokens, total, err := model.SearchUserTokens(userId, keyword, token, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	// ===== CUSTOM START: route to SearchUserTokensV2 when q present =====
+	tokens, total, err := model.SearchUserTokensV2(userId, keyword, token, q, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	// ===== CUSTOM END =====
 	if err != nil {
 		common.ApiError(c, err)
 		return

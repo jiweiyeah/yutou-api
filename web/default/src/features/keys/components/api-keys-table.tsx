@@ -226,14 +226,18 @@ export function ApiKeysTable() {
       const hasFilter = globalFilter?.trim()
 
       if (hasFilter) {
-        const result = await searchApiKeys({ keyword: globalFilter })
+        const result = await searchApiKeys({
+          q: globalFilter,
+          p: pagination.pageIndex + 1,
+          size: pagination.pageSize,
+        })
         if (!result.success) {
           toast.error(result.message || t(ERROR_MESSAGES.SEARCH_FAILED))
           return { items: [], total: 0 }
         }
         return {
-          items: result.data || [],
-          total: result.data?.length || 0,
+          items: result.data?.items || [],
+          total: result.data?.total || 0,
         }
       }
 
@@ -273,13 +277,12 @@ export function ApiKeysTable() {
     onRowSelectionChange: setRowSelection,
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
-    globalFilterFn: (row, _columnId, filterValue) => {
-      const name = String(row.getValue('name')).toLowerCase()
-      const key = String(row.original.key).toLowerCase()
-      const searchValue = String(filterValue).toLowerCase()
-
-      return name.includes(searchValue) || key.includes(searchValue)
-    },
+    // Global filter is handled by the backend (`/api/token/search?q=...`).
+    // We keep the state for URL sync via useTableUrlState, but tell react-table
+    // not to apply client-side filtering — otherwise rows returned by the
+    // server (whose `key` is masked, e.g. "xxxx**********yyyy") would be
+    // filtered out by .includes() against the raw user input.
+    manualFiltering: true,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
@@ -289,10 +292,8 @@ export function ApiKeysTable() {
     onPaginationChange,
     onGlobalFilterChange,
     onColumnFiltersChange,
-    manualPagination: !globalFilter,
-    pageCount: globalFilter
-      ? Math.ceil((data?.total || 0) / pagination.pageSize)
-      : Math.ceil((data?.total || 0) / pagination.pageSize),
+    manualPagination: true,
+    pageCount: Math.ceil((data?.total || 0) / pagination.pageSize),
   })
 
   const pageCount = table.getPageCount()

@@ -309,13 +309,31 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	}
 
 	if modelName != "" {
-		tx = tx.Where("logs.model_name like ?", modelName)
+		// ===== CUSTOM START: fuzzy match via sanitizeLikePattern (consistent with GetUserLogs) =====
+		modelNamePattern, err := sanitizeLikePattern(modelName)
+		if err != nil {
+			return nil, 0, err
+		}
+		tx = tx.Where("logs.model_name LIKE ? ESCAPE '!'", modelNamePattern)
+		// ===== CUSTOM END =====
 	}
 	if username != "" {
-		tx = tx.Where("logs.username = ?", username)
+		// ===== CUSTOM START: fuzzy match username =====
+		usernamePattern, err := sanitizeLikePattern(username)
+		if err != nil {
+			return nil, 0, err
+		}
+		tx = tx.Where("logs.username LIKE ? ESCAPE '!'", usernamePattern)
+		// ===== CUSTOM END =====
 	}
 	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
+		// ===== CUSTOM START: fuzzy match token_name =====
+		tokenNamePattern, err := sanitizeLikePattern(tokenName)
+		if err != nil {
+			return nil, 0, err
+		}
+		tx = tx.Where("logs.token_name LIKE ? ESCAPE '!'", tokenNamePattern)
+		// ===== CUSTOM END =====
 	}
 	if requestId != "" {
 		tx = tx.Where("logs.request_id = ?", requestId)
@@ -405,7 +423,13 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 		tx = tx.Where("logs.model_name LIKE ? ESCAPE '!'", modelNamePattern)
 	}
 	if tokenName != "" {
-		tx = tx.Where("logs.token_name = ?", tokenName)
+		// ===== CUSTOM START: fuzzy match token_name =====
+		tokenNamePattern, err := sanitizeLikePattern(tokenName)
+		if err != nil {
+			return nil, 0, err
+		}
+		tx = tx.Where("logs.token_name LIKE ? ESCAPE '!'", tokenNamePattern)
+		// ===== CUSTOM END =====
 	}
 	if requestId != "" {
 		tx = tx.Where("logs.request_id = ?", requestId)
@@ -450,12 +474,24 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, sum(prompt_tokens) + sum(completion_tokens) tpm")
 
 	if username != "" {
-		tx = tx.Where("username = ?", username)
-		rpmTpmQuery = rpmTpmQuery.Where("username = ?", username)
+		// ===== CUSTOM START: fuzzy match username (consistent with GetAllLogs) =====
+		usernamePattern, err := sanitizeLikePattern(username)
+		if err != nil {
+			return stat, err
+		}
+		tx = tx.Where("username LIKE ? ESCAPE '!'", usernamePattern)
+		rpmTpmQuery = rpmTpmQuery.Where("username LIKE ? ESCAPE '!'", usernamePattern)
+		// ===== CUSTOM END =====
 	}
 	if tokenName != "" {
-		tx = tx.Where("token_name = ?", tokenName)
-		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
+		// ===== CUSTOM START: fuzzy match token_name =====
+		tokenNamePattern, err := sanitizeLikePattern(tokenName)
+		if err != nil {
+			return stat, err
+		}
+		tx = tx.Where("token_name LIKE ? ESCAPE '!'", tokenNamePattern)
+		rpmTpmQuery = rpmTpmQuery.Where("token_name LIKE ? ESCAPE '!'", tokenNamePattern)
+		// ===== CUSTOM END =====
 	}
 	if startTimestamp != 0 {
 		tx = tx.Where("created_at >= ?", startTimestamp)

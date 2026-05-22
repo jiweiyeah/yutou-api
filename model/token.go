@@ -125,6 +125,17 @@ func sanitizeLikePattern(input string) (string, error) {
 const searchHardLimit = 100
 
 func SearchUserTokens(userId int, keyword string, token string, offset int, limit int) (tokens []*Token, total int64, err error) {
+	// ===== CUSTOM START: forward to SearchUserTokensV2 for backward compatibility =====
+	return SearchUserTokensV2(userId, keyword, token, "", offset, limit)
+	// ===== CUSTOM END =====
+}
+
+// ===== CUSTOM START: SearchUserTokensV2 adds a generic `q` parameter that fuzzy-matches name OR key =====
+// SearchUserTokensV2 在保留 keyword/token 双字段精确筛选的同时，新增 q（通用关键词）：
+//   - 当 q 非空时，匹配 (name LIKE q OR key LIKE q)，与 keyword/token 同时存在则共同生效（AND）。
+//   - q 走与 keyword/token 相同的 sanitizeLikePattern 校验，避免 SQL 注入与异常模式。
+//   - 调用方应在传入前自行剥掉密钥的 "sk-" 前缀（数据库 key 列不含 sk-）。
+func SearchUserTokensV2(userId int, keyword string, token string, q string, offset int, limit int) (tokens []*Token, total int64, err error) {
 	// model 层强制截断
 	if limit <= 0 || limit > searchHardLimit {
 		limit = searchHardLimit
@@ -136,10 +147,13 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 	if token != "" {
 		token = strings.TrimPrefix(token, "sk-")
 	}
+	if q != "" {
+		q = strings.TrimPrefix(q, "sk-")
+	}
 
 	// 超量用户（令牌数超过上限）只允许精确搜索，禁止模糊搜索
 	maxTokens := operation_setting.GetMaxUserTokens()
-	hasFuzzy := strings.Contains(keyword, "%") || strings.Contains(token, "%")
+	hasFuzzy := strings.Contains(keyword, "%") || strings.Contains(token, "%") || strings.Contains(q, "%")
 	if hasFuzzy {
 		count, err := CountUserTokens(userId)
 		if err != nil {
@@ -168,6 +182,16 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 		}
 		baseQuery = baseQuery.Where(commonKeyCol+" LIKE ? ESCAPE '!'", tokenPattern)
 	}
+	if q != "" {
+		qPattern, err := sanitizeLikePattern(q)
+		if err != nil {
+			return nil, 0, err
+		}
+		baseQuery = baseQuery.Where(
+			"name LIKE ? ESCAPE '!' OR "+commonKeyCol+" LIKE ? ESCAPE '!'",
+			qPattern, qPattern,
+		)
+	}
 
 	// 先查匹配总数（用于分页，受 maxTokens 上限保护，避免全表 COUNT）
 	err = baseQuery.Limit(maxTokens).Count(&total).Error
@@ -184,6 +208,8 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 	}
 	return tokens, total, nil
 }
+
+// ===== CUSTOM END =====
 
 func ValidateUserToken(key string) (token *Token, err error) {
 	if key == "" {

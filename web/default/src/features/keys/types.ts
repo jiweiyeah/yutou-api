@@ -76,8 +76,12 @@ export interface GetApiKeysResponse {
 }
 
 export interface SearchApiKeysParams {
+  // Filter by token name (legacy advanced search field).
   keyword?: string
+  // Filter by token key (legacy advanced search field).
   token?: string
+  // Generic search: fuzzy-matches name OR key. Preferred for the single search box.
+  q?: string
   p?: number
   size?: number
 }

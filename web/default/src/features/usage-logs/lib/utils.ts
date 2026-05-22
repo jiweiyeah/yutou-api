@@ -167,6 +167,21 @@ export function buildBaseParams(config: {
   }
 }
 
+// ===== CUSTOM START: convert raw input into a LIKE pattern for fuzzy log search =====
+// Matches the backend's `sanitizeLikePattern` rules:
+//   - empty/whitespace → '' (skip filter)
+//   - already contains `%` → trust user wildcard
+//   - length < 2 → exact match (backend rejects fuzzy < 2)
+//   - otherwise wrap as `%kw%` for substring match
+function toLikeParam(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) return ''
+  if (trimmed.includes('%')) return trimmed
+  if (trimmed.length < 2) return trimmed
+  return `%${trimmed}%`
+}
+// ===== CUSTOM END =====
+
 /**
  * Build API params from search params and column filters (for common logs)
  */
@@ -187,20 +202,24 @@ export function buildApiParams(config: {
     return undefined
   }
 
+  // ===== CUSTOM START: auto wrap fuzzy fields with % =====
+  const modelPattern = toLikeParam(String(searchParams.model ?? ''))
+  const tokenPattern = toLikeParam(String(searchParams.token ?? ''))
+  const usernamePattern = toLikeParam(String(searchParams.username ?? ''))
+  // ===== CUSTOM END =====
+
   // Build base params from search params
   const params: GetLogsParams = {
     p: page,
     page_size: pageSize,
     ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
-    ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
-    ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
+    ...(modelPattern ? { model_name: modelPattern } : {}),
+    ...(tokenPattern ? { token_name: tokenPattern } : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
     ...(isAdmin && searchParams.channel
       ? { channel: Number(searchParams.channel) || 0 }
       : {}),
-    ...(isAdmin && searchParams.username
-      ? { username: String(searchParams.username) }
-      : {}),
+    ...(isAdmin && usernamePattern ? { username: usernamePattern } : {}),
     ...(searchParams.requestId
       ? { request_id: String(searchParams.requestId) }
       : {}),
@@ -220,10 +239,14 @@ export function buildApiParams(config: {
           params.type = processType(value)
           break
         case 'model_name':
-          params.model_name = String(value)
+          // ===== CUSTOM START: fuzzy =====
+          params.model_name = toLikeParam(String(value))
+          // ===== CUSTOM END =====
           break
         case 'token_name':
-          params.token_name = String(value)
+          // ===== CUSTOM START: fuzzy =====
+          params.token_name = toLikeParam(String(value))
+          // ===== CUSTOM END =====
           break
         case 'group':
           params.group = String(value)
@@ -232,7 +255,9 @@ export function buildApiParams(config: {
           if (isAdmin) params.channel = Number(value) || 0
           break
         case 'username':
-          if (isAdmin) params.username = String(value)
+          // ===== CUSTOM START: fuzzy =====
+          if (isAdmin) params.username = toLikeParam(String(value))
+          // ===== CUSTOM END =====
           break
       }
     })

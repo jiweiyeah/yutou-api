@@ -39,14 +39,40 @@ export async function getApiKeys(
   return res.data
 }
 
+// Convert raw input into a LIKE pattern accepted by the backend `sanitizeLikePattern`.
+// - Empty / whitespace input → '' (skip the filter)
+// - Already contains `%` → trust the user's wildcard
+// - Length < 2 → keep as-is for exact match (backend rejects fuzzy < 2 chars)
+// - Otherwise wrap as `%kw%` for substring search
+function buildLikePattern(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) return ''
+  if (trimmed.includes('%')) return trimmed
+  if (trimmed.length < 2) return trimmed
+  return `%${trimmed}%`
+}
+
+// Strip the user-facing "sk-" prefix before sending to the backend.
+// The DB `key` column stores raw random strings without the "sk-" prefix; the
+// UI only prepends it cosmetically. Trimming here lets pasted full keys
+// (e.g. "sk-abc123") match the stored value.
+function stripSkPrefix(input: string): string {
+  const trimmed = input.trim()
+  return trimmed.startsWith('sk-') ? trimmed.slice(3) : trimmed
+}
+
 // Search API keys by keyword or token (with pagination)
 export async function searchApiKeys(
   params: SearchApiKeysParams
-): Promise<{ success: boolean; message?: string; data?: ApiKey[] }> {
-  const { keyword = '', token = '', p, size } = params
+): Promise<GetApiKeysResponse> {
+  const { keyword = '', token = '', q = '', p, size } = params
   const queryParams = new URLSearchParams()
-  if (keyword) queryParams.set('keyword', keyword)
-  if (token) queryParams.set('token', token)
+  const keywordPattern = buildLikePattern(keyword)
+  const tokenPattern = buildLikePattern(token)
+  const qPattern = buildLikePattern(stripSkPrefix(q))
+  if (keywordPattern) queryParams.set('keyword', keywordPattern)
+  if (tokenPattern) queryParams.set('token', tokenPattern)
+  if (qPattern) queryParams.set('q', qPattern)
   if (p != null) queryParams.set('p', String(p))
   if (size != null) queryParams.set('size', String(size))
   const res = await api.get(`/api/token/search?${queryParams.toString()}`)
