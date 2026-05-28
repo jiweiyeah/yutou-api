@@ -30,6 +30,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
+import { useDebounce } from '@/hooks'
 import { Database } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -43,6 +44,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from '@/components/ui/empty'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   DISABLED_ROW_DESKTOP,
@@ -153,7 +155,6 @@ function ApiKeysMobileList({
                 <StatusBadge
                   label={t(statusConfig.label)}
                   variant={statusConfig.variant}
-                  showDot={statusConfig.showDot}
                   copyable={false}
                 />
               )}
@@ -208,8 +209,34 @@ export function ApiKeysTable() {
     navigate: route.useNavigate(),
     pagination: { defaultPage: 1, defaultPageSize: 20 },
     globalFilter: { enabled: true, key: 'filter' },
-    columnFilters: [{ columnId: 'status', searchKey: 'status', type: 'array' }],
+    columnFilters: [
+      { columnId: 'status', searchKey: 'status', type: 'array' },
+      { columnId: '_tokenSearch', searchKey: 'token', type: 'string' },
+    ],
   })
+
+  const tokenFilterFromUrl =
+    (columnFilters.find((f) => f.id === '_tokenSearch')?.value as string) || ''
+  const [tokenFilterInput, setTokenFilterInput] = useState(tokenFilterFromUrl)
+  const debouncedTokenFilter = useDebounce(tokenFilterInput, 500)
+
+  useEffect(() => {
+    setTokenFilterInput(tokenFilterFromUrl)
+  }, [tokenFilterFromUrl])
+
+  useEffect(() => {
+    if (debouncedTokenFilter !== tokenFilterFromUrl) {
+      onColumnFiltersChange((prev) => {
+        const filtered = prev.filter((f) => f.id !== '_tokenSearch')
+        return debouncedTokenFilter
+          ? [...filtered, { id: '_tokenSearch', value: debouncedTokenFilter }]
+          : filtered
+      })
+    }
+  }, [debouncedTokenFilter, tokenFilterFromUrl, onColumnFiltersChange])
+
+  const tokenFilter = tokenFilterFromUrl
+  const shouldSearch = Boolean(globalFilter?.trim() || tokenFilter.trim())
 
   // Fetch data with React Query
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
@@ -219,36 +246,31 @@ export function ApiKeysTable() {
       pagination.pageIndex + 1,
       pagination.pageSize,
       globalFilter,
+      tokenFilter,
       refreshTrigger,
     ],
     queryFn: async () => {
-      // If there's a global filter, use search
-      const hasFilter = globalFilter?.trim()
-
-      if (hasFilter) {
-        const result = await searchApiKeys({
-          q: globalFilter,
-          p: pagination.pageIndex + 1,
-          size: pagination.pageSize,
-        })
-        if (!result.success) {
-          toast.error(result.message || t(ERROR_MESSAGES.SEARCH_FAILED))
-          return { items: [], total: 0 }
-        }
-        return {
-          items: result.data?.items || [],
-          total: result.data?.total || 0,
-        }
-      }
-
-      // Otherwise use pagination
-      const result = await getApiKeys({
-        p: pagination.pageIndex + 1,
-        size: pagination.pageSize,
-      })
+      const result = shouldSearch
+        ? await searchApiKeys({
+            q: globalFilter,
+            token: tokenFilter,
+            p: pagination.pageIndex + 1,
+            size: pagination.pageSize,
+          })
+        : await getApiKeys({
+            p: pagination.pageIndex + 1,
+            size: pagination.pageSize,
+          })
 
       if (!result.success) {
-        toast.error(result.message || t(ERROR_MESSAGES.LOAD_FAILED))
+        toast.error(
+          result.message ||
+            t(
+              shouldSearch
+                ? ERROR_MESSAGES.SEARCH_FAILED
+                : ERROR_MESSAGES.LOAD_FAILED
+            )
+        )
         return { items: [], total: 0 }
       }
 
@@ -277,11 +299,12 @@ export function ApiKeysTable() {
     onRowSelectionChange: setRowSelection,
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
-    // Global filter is handled by the backend (`/api/token/search?q=...`).
-    // We keep the state for URL sync via useTableUrlState, but tell react-table
-    // not to apply client-side filtering — otherwise rows returned by the
-    // server (whose `key` is masked, e.g. "xxxx**********yyyy") would be
-    // filtered out by .includes() against the raw user input.
+    // Global filter and tokenFilter are handled by the backend
+    // (`/api/token/search?q=...&token=...`). We keep the state for URL sync
+    // via useTableUrlState, but tell react-table not to apply client-side
+    // filtering — otherwise rows returned by the server (whose `key` is
+    // masked, e.g. "xxxx**********yyyy") would be filtered out by
+    // .includes() against the raw user input.
     manualFiltering: true,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
@@ -313,7 +336,16 @@ export function ApiKeysTable() {
       )}
       skeletonKeyPrefix='api-keys-skeleton'
       toolbarProps={{
-        searchPlaceholder: t('Filter by name or key...'),
+        searchPlaceholder: t('Filter by name...'),
+        additionalSearch: (
+          <Input
+            placeholder={t('Filter by API key...')}
+            aria-label={t('Filter by API key...')}
+            value={tokenFilterInput}
+            onChange={(e) => setTokenFilterInput(e.target.value)}
+            className='w-full sm:w-50 lg:w-60'
+          />
+        ),
         filters: [
           {
             columnId: 'status',

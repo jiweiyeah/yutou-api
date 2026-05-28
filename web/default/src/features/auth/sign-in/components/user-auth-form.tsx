@@ -82,8 +82,9 @@ export function UserAuthForm({
     status?.passkey_login ?? status?.data?.passkey_login
   )
   const passwordLoginEnabled =
-    (status?.password_login_enabled ?? status?.data?.password_login_enabled) !==
-    false
+    (status?.password_login_enabled ??
+      status?.data?.password_login_enabled ??
+      true) !== false
   const {
     isTurnstileEnabled,
     turnstileSiteKey,
@@ -101,6 +102,16 @@ export function UserAuthForm({
     !passkeySupported ||
     (requiresLegalConsent && !agreedToLegal)
   const hasWeChatLogin = Boolean(status?.wechat_login)
+  const hasOAuthLogin = Boolean(
+    status?.github_oauth ||
+    status?.discord_oauth ||
+    status?.oidc_enabled ||
+    status?.linuxdo_oauth ||
+    status?.telegram_oauth ||
+    (status?.custom_oauth_providers?.length ?? 0) > 0
+  )
+  const hasAlternativeLogin =
+    passkeyLoginEnabled || hasWeChatLogin || hasOAuthLogin
 
   useEffect(() => {
     if (requiresLegalConsent) {
@@ -278,6 +289,42 @@ export function UserAuthForm({
     }
   }
 
+  const alternativeLoginMethods = (
+    <>
+      {passkeyLoginEnabled && (
+        <div className='mt-2 space-y-1'>
+          <Button
+            type='button'
+            variant='outline'
+            disabled={passkeyButtonDisabled}
+            onClick={handlePasskeyLogin}
+            className='h-11 w-full justify-center gap-2 rounded-lg'
+          >
+            {isPasskeyLoading ? (
+              <Loader2 className='h-4 w-4 animate-spin' />
+            ) : (
+              <KeyRound className='h-4 w-4' />
+            )}
+            {t('Sign in with Passkey')}
+          </Button>
+          {!passkeySupported && (
+            <p className='text-muted-foreground text-xs'>
+              {t('Passkey is not supported on this device.')}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* OAuth Providers */}
+      <OAuthProviders
+        status={status}
+        disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
+        onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
+        isWeChatLoading={isWeChatSubmitting}
+      />
+    </>
+  )
+
   return (
     <Form {...form}>
       <form
@@ -285,6 +332,8 @@ export function UserAuthForm({
         className={cn('grid gap-4', className)}
         {...props}
       >
+        {hasAlternativeLogin && alternativeLoginMethods}
+
         {passwordLoginEnabled && (
           <>
             {/* Username Field */}
@@ -358,38 +407,7 @@ export function UserAuthForm({
           className='mt-1'
         />
 
-        {passkeyLoginEnabled && (
-          <div className='mt-2 space-y-1'>
-            <Button
-              type='button'
-              variant='outline'
-              disabled={passkeyButtonDisabled}
-              onClick={handlePasskeyLogin}
-              className='h-11 w-full justify-center gap-2 rounded-lg'
-            >
-              {isPasskeyLoading ? (
-                <Loader2 className='h-4 w-4 animate-spin' />
-              ) : (
-                <KeyRound className='h-4 w-4' />
-              )}
-              {t('Sign in with Passkey')}
-            </Button>
-            {!passkeySupported && (
-              <p className='text-muted-foreground text-xs'>
-                {t('Passkey is not supported on this device.')}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* OAuth Providers */}
-        <OAuthProviders
-          status={status}
-          disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
-          onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
-          isWeChatLoading={isWeChatSubmitting}
-          showDivider={passwordLoginEnabled}
-        />
+        {!hasAlternativeLogin && alternativeLoginMethods}
       </form>
 
       {hasWeChatLogin && (
