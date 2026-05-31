@@ -44,6 +44,7 @@ export interface SystemConfig {
   demoSiteEnabled?: boolean
   displayTokenStatEnabled?: boolean
   currency: CurrencyConfig
+  disableSubscriptionBalancePayment?: boolean
 }
 
 export const DEFAULT_CURRENCY_CONFIG: CurrencyConfig = {

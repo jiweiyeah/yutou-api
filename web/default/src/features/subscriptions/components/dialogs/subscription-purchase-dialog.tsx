@@ -73,7 +73,7 @@ interface Props {
 
 export function SubscriptionPurchaseDialog(props: Props) {
   const { t } = useTranslation()
-  const { currency } = useSystemConfig()
+  const { currency, disableSubscriptionBalancePayment } = useSystemConfig()
   const [paying, setPaying] = useState(false)
   const [selectedEpayMethod, setSelectedEpayMethod] = useState('')
 
@@ -323,28 +323,30 @@ export function SubscriptionPurchaseDialog(props: Props) {
             </Alert>
           )}
 
-          <div className='flex flex-col gap-2 rounded-md border p-3'>
-            <div className='flex items-center justify-between gap-2 text-xs'>
-              <span className='text-muted-foreground'>{t('Required')}</span>
-              <span>{formatQuota(balanceCost)}</span>
+          {!disableSubscriptionBalancePayment && (
+            <div className='flex flex-col gap-2 rounded-md border p-3'>
+              <div className='flex items-center justify-between gap-2 text-xs'>
+                <span className='text-muted-foreground'>{t('Required')}</span>
+                <span>{formatQuota(balanceCost)}</span>
+              </div>
+              <div className='flex items-center justify-between gap-2 text-xs'>
+                <span className='text-muted-foreground'>{t('Available')}</span>
+                <span>{formatQuota(userQuota)}</span>
+              </div>
+              {insufficientBalance && (
+                <Alert variant='destructive'>
+                  <AlertDescription>{t('Insufficient balance')}</AlertDescription>
+                </Alert>
+              )}
+              <Button
+                variant='outline'
+                onClick={handlePayBalance}
+                disabled={paying || limitReached || insufficientBalance}
+              >
+                {t('Pay with Balance')}
+              </Button>
             </div>
-            <div className='flex items-center justify-between gap-2 text-xs'>
-              <span className='text-muted-foreground'>{t('Available')}</span>
-              <span>{formatQuota(userQuota)}</span>
-            </div>
-            {insufficientBalance && (
-              <Alert variant='destructive'>
-                <AlertDescription>{t('Insufficient balance')}</AlertDescription>
-              </Alert>
-            )}
-            <Button
-              variant='outline'
-              onClick={handlePayBalance}
-              disabled={paying || limitReached || insufficientBalance}
-            >
-              {t('Pay with Balance')}
-            </Button>
-          </div>
+          )}
 
           {hasAnyPayment && (
             <div className='space-y-3'>
