@@ -120,7 +120,7 @@ func GetStatus(c *gin.Context) {
 		"user_agreement_enabled":              legalSetting.UserAgreement != "",
 		"privacy_policy_enabled":              legalSetting.PrivacyPolicy != "",
 		"checkin_enabled":                     operation_setting.GetCheckinSetting().Enabled,
-		"disable_subscription_balance_payment": common.GetEnvOrDefault("DISABLE_SUBSCRIPTION_BALANCE_PAYMENT", false),
+		"disable_subscription_balance_payment": common.GetEnvOrDefaultBool("DISABLE_SUBSCRIPTION_BALANCE_PAYMENT", false),
 	}
 
 	// 根据启用状态注入可选内容

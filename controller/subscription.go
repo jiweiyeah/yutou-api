@@ -102,7 +102,7 @@ func SubscriptionRequestBalancePay(c *gin.Context) {
 	}
 
 	// ===== CUSTOM START: 检查是否禁用订阅余额支付 =====
-	if common.GetEnvOrDefault("DISABLE_SUBSCRIPTION_BALANCE_PAYMENT", false) {
+	if common.GetEnvOrDefaultBool("DISABLE_SUBSCRIPTION_BALANCE_PAYMENT", false) {
 		common.ApiErrorMsg(c, "订阅购买不支持余额支付，请使用其他支付方式")
 		return
 	}
