@@ -222,6 +222,70 @@ export function useUsersColumns(): ColumnDef<User>[] {
       },
       meta: { label: t('Quota') },
     },
+    // ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
+    {
+      id: 'total_topup',
+      accessorKey: 'total_topup_quota',
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title={t('Total Top-up')} />
+      ),
+      cell: ({ row }) => {
+        const value = (row.original.total_topup_quota ?? 0) as number
+        if (value <= 0) {
+          return (
+            <StatusBadge
+              label={t('No Top-up')}
+              variant='neutral'
+              copyable={false}
+            />
+          )
+        }
+        return (
+          <span className='font-medium tabular-nums'>{formatQuota(value)}</span>
+        )
+      },
+      enableSorting: false,
+      meta: { label: t('Total Top-up') },
+    },
+    {
+      id: 'subscription',
+      accessorKey: 'sub_active',
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title={t('Subscription')} />
+      ),
+      cell: ({ row }) => {
+        const active = Boolean(row.original.sub_active)
+        const endTime = row.original.sub_end_time
+        if (!active) {
+          return (
+            <StatusBadge
+              label={t('No Subscription')}
+              variant='neutral'
+              copyable={false}
+            />
+          )
+        }
+        return (
+          <Tooltip>
+            <TooltipTrigger render={<div className='cursor-help' />}>
+              <StatusBadge
+                label={t('Subscribed')}
+                variant='success'
+                copyable={false}
+              />
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className='text-xs'>
+                {t('Expires At')}: {endTime ? formatTimestamp(endTime) : '-'}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )
+      },
+      enableSorting: false,
+      meta: { label: t('Subscription') },
+    },
+    // ===== CUSTOM END =====
     {
       accessorKey: 'group',
       header: ({ column }) => (

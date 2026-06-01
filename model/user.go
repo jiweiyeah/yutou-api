@@ -53,6 +53,11 @@ type User struct {
 	StripeCustomer   string         `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
 	CreatedAt        int64          `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	LastLoginAt      int64          `json:"last_login_at" gorm:"default:0;column:last_login_at"`
+	// ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
+	TotalTopupQuota int64 `json:"total_topup_quota" gorm:"-"` // 在线支付+兑换码，折合 quota 单位
+	SubActive       bool  `json:"sub_active" gorm:"-"`        // 是否有进行中订阅
+	SubEndTime      int64 `json:"sub_end_time" gorm:"-"`      // 最晚到期时间(秒)，0=无
+	// ===== CUSTOM END =====
 }
 
 func (user *User) ToBaseUser() *UserBase {
@@ -222,6 +227,12 @@ func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err err
 		return nil, 0, err
 	}
 
+	// ===== CUSTOM START: attach topup/subscription aggregates =====
+	if aggErr := attachUserAggregates(users); aggErr != nil {
+		common.SysError("attachUserAggregates failed (GetAllUsers): " + aggErr.Error())
+	}
+	// ===== CUSTOM END =====
+
 	return users, total, nil
 }
 
@@ -285,6 +296,12 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	if err = tx.Commit().Error; err != nil {
 		return nil, 0, err
 	}
+
+	// ===== CUSTOM START: attach topup/subscription aggregates =====
+	if aggErr := attachUserAggregates(users); aggErr != nil {
+		common.SysError("attachUserAggregates failed (SearchUsers): " + aggErr.Error())
+	}
+	// ===== CUSTOM END =====
 
 	return users, total, nil
 }

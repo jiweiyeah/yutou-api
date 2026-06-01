@@ -57,6 +57,11 @@ export const userSchema = z.object({
   last_login_at: z.number().optional(),
   DeletedAt: z.any().nullable().optional(),
   remark: z.string().optional(),
+  // ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
+  total_topup_quota: z.number().optional(),
+  sub_active: z.boolean().optional(),
+  sub_end_time: z.number().optional(),
+  // ===== CUSTOM END =====
 })
 export type User = z.infer<typeof userSchema>
 
