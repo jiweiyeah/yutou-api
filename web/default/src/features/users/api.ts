@@ -54,6 +54,9 @@ export async function searchUsers(
     group = '',
     role = '',
     status = '',
+    sub_status = '', // ===== CUSTOM: subscription filter =====
+    order_by = '', // ===== CUSTOM: sort field =====
+    order_dir = '', // ===== CUSTOM: sort direction =====
     p = 1,
     page_size = 10,
   } = params
@@ -62,6 +65,9 @@ export async function searchUsers(
   queryParams.set('group', group)
   if (role) queryParams.set('role', role)
   if (status) queryParams.set('status', status)
+  if (sub_status) queryParams.set('sub_status', sub_status) // ===== CUSTOM =====
+  if (order_by) queryParams.set('order_by', order_by) // ===== CUSTOM =====
+  if (order_dir) queryParams.set('order_dir', order_dir) // ===== CUSTOM =====
   queryParams.set('p', String(p))
   queryParams.set('page_size', String(page_size))
   const res = await api.get(`/api/user/search?${queryParams.toString()}`)

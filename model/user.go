@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -54,9 +53,10 @@ type User struct {
 	CreatedAt        int64          `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	LastLoginAt      int64          `json:"last_login_at" gorm:"default:0;column:last_login_at"`
 	// ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
-	TotalTopupQuota int64 `json:"total_topup_quota" gorm:"-"` // 在线支付+兑换码，折合 quota 单位
-	SubActive       bool  `json:"sub_active" gorm:"-"`        // 是否有进行中订阅
-	SubEndTime      int64 `json:"sub_end_time" gorm:"-"`      // 最晚到期时间(秒)，0=无
+	TotalTopupQuota int64   `json:"total_topup_quota" gorm:"-"` // 在线支付+兑换码，折合 quota 单位
+	TotalTopupMoney float64 `json:"total_topup_money" gorm:"-"` // 实付金额，仅在线支付 SUM(money)
+	SubActive       bool    `json:"sub_active" gorm:"-"`        // 是否有进行中订阅
+	SubEndTime      int64   `json:"sub_end_time" gorm:"-"`      // 最晚到期时间(秒)，0=无
 	// ===== CUSTOM END =====
 }
 
@@ -196,114 +196,23 @@ func GetMaxUserId() int {
 	return user.Id
 }
 
+// GetAllUsers 用户列表（无关键字筛选）。
+// ===== CUSTOM: 委托统一查询 queryUsers，支持订阅过滤 + 累计充值排序 =====
 func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err error) {
-	// Start transaction
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return nil, 0, tx.Error
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Get total count within transaction
-	err = tx.Unscoped().Model(&User{}).Count(&total).Error
-	if err != nil {
-		tx.Rollback()
-		return nil, 0, err
-	}
-
-	// Get paginated users within same transaction
-	err = tx.Unscoped().Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password").Find(&users).Error
-	if err != nil {
-		tx.Rollback()
-		return nil, 0, err
-	}
-
-	// Commit transaction
-	if err = tx.Commit().Error; err != nil {
-		return nil, 0, err
-	}
-
-	// ===== CUSTOM START: attach topup/subscription aggregates =====
-	if aggErr := attachUserAggregates(users); aggErr != nil {
-		common.SysError("attachUserAggregates failed (GetAllUsers): " + aggErr.Error())
-	}
-	// ===== CUSTOM END =====
-
-	return users, total, nil
+	return queryUsers("", "", nil, nil, SubStatusAny, OrderByDefault, "", pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 }
 
-func SearchUsers(keyword string, group string, role *int, status *int, startIdx int, num int) ([]*User, int64, error) {
-	var users []*User
-	var total int64
-	var err error
+// GetAllUsersFiltered 用户列表（无关键字，但带订阅过滤/排序）。
+// 供 controller 在"无搜索关键字但需要筛选/排序"时调用。
+// ===== CUSTOM =====
+func GetAllUsersFiltered(subStatus, orderBy, orderDir string, pageInfo *common.PageInfo) (users []*User, total int64, err error) {
+	return queryUsers("", "", nil, nil, subStatus, orderBy, orderDir, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+}
 
-	// 开始事务
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return nil, 0, tx.Error
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// 构建基础查询
-	query := tx.Unscoped().Model(&User{})
-
-	// 构建搜索条件
-	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
-	likeArgs := []interface{}{"%" + keyword + "%", "%" + keyword + "%", "%" + keyword + "%"}
-
-	// 尝试将关键字转换为整数ID
-	keywordInt, err := strconv.Atoi(keyword)
-	if err == nil {
-		// 如果是数字，同时搜索ID和其他字段
-		likeCondition = "id = ? OR " + likeCondition
-		likeArgs = append([]interface{}{keywordInt}, likeArgs...)
-	}
-
-	query = query.Where("("+likeCondition+")", likeArgs...)
-	if group != "" {
-		query = query.Where(commonGroupCol+" = ?", group)
-	}
-	if role != nil {
-		query = query.Where("role = ?", *role)
-	}
-	if status != nil {
-		query = query.Where("status = ?", *status)
-	}
-
-	// 获取总数
-	err = query.Count(&total).Error
-	if err != nil {
-		tx.Rollback()
-		return nil, 0, err
-	}
-
-	// 获取分页数据
-	err = query.Omit("password").Order("id desc").Limit(num).Offset(startIdx).Find(&users).Error
-	if err != nil {
-		tx.Rollback()
-		return nil, 0, err
-	}
-
-	// 提交事务
-	if err = tx.Commit().Error; err != nil {
-		return nil, 0, err
-	}
-
-	// ===== CUSTOM START: attach topup/subscription aggregates =====
-	if aggErr := attachUserAggregates(users); aggErr != nil {
-		common.SysError("attachUserAggregates failed (SearchUsers): " + aggErr.Error())
-	}
-	// ===== CUSTOM END =====
-
-	return users, total, nil
+// SearchUsers 用户列表（带关键字/分组/角色/状态/订阅/排序）。
+// ===== CUSTOM: 扩展签名 +subStatus/orderBy/orderDir，委托统一查询 queryUsers =====
+func SearchUsers(keyword string, group string, role *int, status *int, subStatus, orderBy, orderDir string, startIdx int, num int) ([]*User, int64, error) {
+	return queryUsers(keyword, group, role, status, subStatus, orderBy, orderDir, startIdx, num)
 }
 
 func GetUserById(id int, selectAll bool) (*User, error) {

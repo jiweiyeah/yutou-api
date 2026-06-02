@@ -59,6 +59,7 @@ export const userSchema = z.object({
   remark: z.string().optional(),
   // ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
   total_topup_quota: z.number().optional(),
+  total_topup_money: z.number().optional(), // 实付金额，仅在线支付 SUM(money)
   sub_active: z.boolean().optional(),
   sub_end_time: z.number().optional(),
   // ===== CUSTOM END =====
@@ -99,6 +100,9 @@ export interface SearchUsersParams {
   group?: string
   role?: string
   status?: string
+  sub_status?: string // ===== CUSTOM: subscription filter (active|none) =====
+  order_by?: string // ===== CUSTOM: sort field (total_topup) =====
+  order_dir?: string // ===== CUSTOM: sort direction (asc|desc) =====
   p?: number
   page_size?: number
 }

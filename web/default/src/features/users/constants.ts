@@ -94,6 +94,15 @@ export const getUserRoleOptions = (t: (key: string) => string) => [
 ]
 
 // ============================================================================
+// Subscription Status Configuration (CUSTOM)
+// ============================================================================
+
+export const getSubscriptionStatusOptions = (t: (key: string) => string) => [
+  { label: t('Subscribed'), value: 'active' },
+  { label: t('No Subscription'), value: 'none' },
+]
+
+// ============================================================================
 // Default Values
 // ============================================================================
 

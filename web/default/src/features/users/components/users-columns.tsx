@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { type ColumnDef } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
-import { formatQuota, formatTimestamp } from '@/lib/format'
+import { formatNumber, formatQuota, formatTimestamp } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Progress } from '@/components/ui/progress'
@@ -230,8 +230,9 @@ export function useUsersColumns(): ColumnDef<User>[] {
         <DataTableColumnHeader column={column} title={t('Total Top-up')} />
       ),
       cell: ({ row }) => {
-        const value = (row.original.total_topup_quota ?? 0) as number
-        if (value <= 0) {
+        const quota = (row.original.total_topup_quota ?? 0) as number
+        const money = (row.original.total_topup_money ?? 0) as number
+        if (quota <= 0 && money <= 0) {
           return (
             <StatusBadge
               label={t('No Top-up')}
@@ -241,10 +242,17 @@ export function useUsersColumns(): ColumnDef<User>[] {
           )
         }
         return (
-          <span className='font-medium tabular-nums'>{formatQuota(value)}</span>
+          <div className='flex flex-col gap-0.5'>
+            <span className='font-medium tabular-nums'>{formatQuota(quota)}</span>
+            {money > 0 && (
+              <span className='text-xs text-muted-foreground tabular-nums'>
+                {formatNumber(money)} {t('paid')}
+              </span>
+            )}
+          </div>
         )
       },
-      enableSorting: false,
+      enableSorting: true,
       meta: { label: t('Total Top-up') },
     },
     {
@@ -281,6 +289,15 @@ export function useUsersColumns(): ColumnDef<User>[] {
             </TooltipContent>
           </Tooltip>
         )
+      },
+      filterFn: (row, _id, value) => {
+        // value is ['active'] or ['none'] from toolbar filter
+        // Server already filtered, but TanStack Table needs client filterFn to match
+        const subActive = Boolean(row.original.sub_active)
+        const filterValue = value[0] // 'active' or 'none'
+        if (filterValue === 'active') return subActive
+        if (filterValue === 'none') return !subActive
+        return true // no filter
       },
       enableSorting: false,
       meta: { label: t('Subscription') },

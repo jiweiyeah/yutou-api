@@ -44,6 +44,7 @@ import {
   USER_STATUS,
   getUserStatusOptions,
   getUserRoleOptions,
+  getSubscriptionStatusOptions,
   isUserDeleted,
 } from '../constants'
 import type { User } from '../types'
@@ -83,6 +84,7 @@ export function UsersTable() {
       { columnId: 'status', searchKey: 'status', type: 'array' },
       { columnId: 'role', searchKey: 'role', type: 'array' },
       { columnId: 'group', searchKey: 'group', type: 'string' },
+      { columnId: 'subscription', searchKey: 'sub_status', type: 'array' }, // ===== CUSTOM =====
     ],
   })
   const statusFilter =
@@ -96,6 +98,12 @@ export function UsersTable() {
   const groupFilter =
     (columnFilters.find((filter) => filter.id === 'group')?.value as string) ??
     ''
+  // ===== CUSTOM START: subscription filter =====
+  const subscriptionFilter =
+    (columnFilters.find((filter) => filter.id === 'subscription')?.value as
+      | string[]
+      | undefined) ?? []
+  // ===== CUSTOM END =====
 
   // Fetch data with React Query
   const { data, isLoading, isFetching } = useQuery({
@@ -107,25 +115,42 @@ export function UsersTable() {
       statusFilter,
       roleFilter,
       groupFilter,
+      subscriptionFilter, // ===== CUSTOM =====
+      sorting, // ===== CUSTOM: sorting =====
       refreshTrigger,
     ],
     queryFn: async () => {
       const hasFilter = globalFilter?.trim()
       const hasColumnFilter =
-        statusFilter.length > 0 || roleFilter.length > 0 || Boolean(groupFilter)
+        statusFilter.length > 0 ||
+        roleFilter.length > 0 ||
+        Boolean(groupFilter) ||
+        subscriptionFilter.length > 0 // ===== CUSTOM =====
+
+      // ===== CUSTOM START: derive order_by / order_dir from sorting state =====
+      const sortCol = sorting[0]
+      const orderBy =
+        sortCol?.id === 'total_topup' ? 'total_topup' : ''
+      const orderDir = sortCol ? (sortCol.desc ? 'desc' : 'asc') : ''
+      const hasSorting = Boolean(orderBy)
+      // ===== CUSTOM END =====
+
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
       }
 
       const result =
-        hasFilter || hasColumnFilter
+        hasFilter || hasColumnFilter || hasSorting // ===== CUSTOM: hasSorting also triggers searchUsers =====
           ? await searchUsers({
               ...params,
               keyword: globalFilter,
               status: statusFilter[0] ?? '',
               role: roleFilter[0] ?? '',
               group: groupFilter,
+              sub_status: subscriptionFilter[0] ?? '', // ===== CUSTOM =====
+              order_by: orderBy, // ===== CUSTOM =====
+              order_dir: orderDir, // ===== CUSTOM =====
             })
           : await getUsers(params)
 
@@ -216,6 +241,12 @@ export function UsersTable() {
             columnId: 'role',
             title: t('Role'),
             options: getUserRoleOptions(t),
+            singleSelect: true,
+          },
+          {
+            columnId: 'subscription',
+            title: t('Subscription'),
+            options: getSubscriptionStatusOptions(t),
             singleSelect: true,
           },
         ],

@@ -233,8 +233,44 @@ func Register(c *gin.Context) {
 	return
 }
 
+// ===== CUSTOM START: normalize subscription filter / topup sort query params =====
+// normalizeUserListControls 白名单化订阅过滤与排序参数，防止任意输入流入 SQL。
+func normalizeUserListControls(c *gin.Context) (subStatus, orderBy, orderDir string) {
+	subStatus = c.Query("sub_status")
+	if subStatus != model.SubStatusActive && subStatus != model.SubStatusNone {
+		subStatus = model.SubStatusAny
+	}
+	orderBy = c.Query("order_by")
+	if orderBy != model.OrderByTotalTopup {
+		orderBy = model.OrderByDefault
+	}
+	orderDir = strings.ToLower(c.Query("order_dir"))
+	if orderDir != "asc" {
+		orderDir = "desc"
+	}
+	return
+}
+
+// ===== CUSTOM END =====
+
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
+
+	// ===== CUSTOM START: support subscription filter / topup sort without a keyword =====
+	subStatus, orderBy, orderDir := normalizeUserListControls(c)
+	if subStatus != model.SubStatusAny || orderBy != model.OrderByDefault {
+		users, total, err := model.GetAllUsersFiltered(subStatus, orderBy, orderDir, pageInfo)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		pageInfo.SetTotal(int(total))
+		pageInfo.SetItems(users)
+		common.ApiSuccess(c, pageInfo)
+		return
+	}
+	// ===== CUSTOM END =====
+
 	users, total, err := model.GetAllUsers(pageInfo)
 	if err != nil {
 		common.ApiError(c, err)
@@ -263,8 +299,10 @@ func SearchUsers(c *gin.Context) {
 			status = &parsed
 		}
 	}
+	// ===== CUSTOM: subscription filter / topup sort =====
+	subStatus, orderBy, orderDir := normalizeUserListControls(c)
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	users, total, err := model.SearchUsers(keyword, group, role, status, subStatus, orderBy, orderDir, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
 		return
