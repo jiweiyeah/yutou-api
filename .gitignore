@@ -42,3 +42,6 @@ __pycache__/
 
 # Local token batch input (contains real sk-... keys)
 bin/tokens.txt
+
+# Local channel export (contains real API keys/tokens)
+bin/channel_result.txt

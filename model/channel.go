@@ -704,6 +704,9 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
+	// ===== CUSTOM START: 性能监控 =====
+	RecordChannelStatusChange(status == common.ChannelStatusEnabled)
+	// ===== CUSTOM END =====
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()
 		defer channelStatusLock.Unlock()

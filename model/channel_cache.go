@@ -23,6 +23,9 @@ func InitChannelCache() {
 	if !common.MemoryCacheEnabled {
 		return
 	}
+	// ===== CUSTOM START: 性能监控 =====
+	startTime := time.Now()
+	// ===== CUSTOM END =====
 	newChannelId2channel := make(map[int]*Channel)
 	var channels []*Channel
 	DB.Find(&channels)
@@ -83,7 +86,11 @@ func InitChannelCache() {
 	}
 	channelsIDM = newChannelId2channel
 	channelSyncLock.Unlock()
-	common.SysLog("channels synced from database")
+	// ===== CUSTOM START: 性能监控 =====
+	durationMs := time.Since(startTime).Milliseconds()
+	RecordCacheSync(durationMs, int64(len(newChannelId2channel)))
+	common.SysLog(fmt.Sprintf("channels synced from database (took %dms, %d channels)", durationMs, len(newChannelId2channel)))
+	// ===== CUSTOM END =====
 }
 
 func SyncChannelCache(frequency int) {
@@ -95,11 +102,32 @@ func SyncChannelCache(frequency int) {
 }
 
 func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel, error) {
+	// ===== CUSTOM START: 性能监控 =====
+	startTime := time.Now()
+	var resultChannel *Channel
+	var resultError error
+	defer func() {
+		durationUs := time.Since(startTime).Microseconds()
+		isSlow := durationUs > 10000 // >10ms
+		isError := resultError != nil
+		RecordChannelSelection(durationUs, isError, isSlow)
+
+		if isSlow {
+			logger.LogWarn(nil, fmt.Sprintf("slow channel selection: group=%s, model=%s, retry=%d, took=%dus",
+				group, model, retry, durationUs))
+		}
+	}()
+	// ===== CUSTOM END =====
+
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry)
+		resultChannel, resultError = GetChannel(group, model, retry)
+		return resultChannel, resultError
 	}
 
+	// ===== CUSTOM START: 锁竞争监控 =====
+	RecordLockWait()
+	// ===== CUSTOM END =====
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
@@ -113,14 +141,17 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 	}
 
 	if len(channels) == 0 {
-		return nil, nil
+		resultChannel, resultError = nil, nil
+		return resultChannel, resultError
 	}
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
-			return channel, nil
+			resultChannel, resultError = channel, nil
+			return resultChannel, resultError
 		}
-		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
+		resultError = fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
+		return nil, resultError
 	}
 
 	uniquePriorities := make(map[int]bool)
@@ -128,7 +159,8 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 		if channel, ok := channelsIDM[channelId]; ok {
 			uniquePriorities[int(channel.GetPriority())] = true
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			resultError = fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, resultError
 		}
 	}
 	var sortedUniquePriorities []int
@@ -152,12 +184,14 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 				targetChannels = append(targetChannels, channel)
 			}
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			resultError = fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, resultError
 		}
 	}
 
 	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		resultError = errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		return nil, resultError
 	}
 
 	// smoothing factor and adjustment
@@ -184,11 +218,13 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 	for _, channel := range targetChannels {
 		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
-			return channel, nil
+			resultChannel, resultError = channel, nil
+			return resultChannel, resultError
 		}
 	}
 	// return null if no channel is not found
-	return nil, errors.New("channel not found")
+	resultError = errors.New("channel not found")
+	return nil, resultError
 }
 
 func CacheGetChannel(id int) (*Channel, error) {
