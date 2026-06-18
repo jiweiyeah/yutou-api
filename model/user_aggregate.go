@@ -134,7 +134,13 @@ func applyUserFilters(query *gorm.DB, keyword, group string, role, status *int, 
 		query = query.Where("role = ?", *role)
 	}
 	if status != nil {
-		query = query.Where("status = ?", *status)
+		// ===== CUSTOM: 吸收上游软删除筛选语义 —— status==-1 查已软删用户，否则仅查未删用户 =====
+		// queryUsers 用 Unscoped()（默认含软删行），故此处显式控制 deleted_at。
+		if *status == -1 {
+			query = query.Where("deleted_at IS NOT NULL")
+		} else {
+			query = query.Where("deleted_at IS NULL").Where("status = ?", *status)
+		}
 	}
 
 	if subStatus == SubStatusActive || subStatus == SubStatusNone {
