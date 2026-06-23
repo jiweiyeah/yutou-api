@@ -66,11 +66,17 @@ interface SubscriptionPlansCardProps {
   onPurchaseSuccess?: () => void | Promise<void>
 }
 
+// ===== CUSTOM START: waffo_pancake 进入下拉框由对话框按 plan 支持情况过滤，waffo(非 pancake) 有独立流程需排除 =====
 function getEpayMethods(payMethods: PaymentMethod[] = []): PaymentMethod[] {
   return payMethods.filter(
-    (m) => m?.type && m.type !== 'stripe' && m.type !== 'creem'
+    (m) =>
+      m?.type &&
+      m.type !== 'stripe' &&
+      m.type !== 'creem' &&
+      m.type !== 'waffo'
   )
 }
+// ===== CUSTOM END =====
 
 function getBillingPreferenceLabel(
   preference: string,

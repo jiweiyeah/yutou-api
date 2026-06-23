@@ -72,13 +72,31 @@ export function SubscriptionPurchaseDialog(props: Props) {
   const [paying, setPaying] = useState(false)
   const [selectedEpayMethod, setSelectedEpayMethod] = useState('')
 
+  // ===== CUSTOM START: 初始选中值需按 plan 是否支持 waffo_pancake 过滤 =====
   useEffect(() => {
-    if (props.open && props.epayMethods && props.epayMethods.length > 0) {
-      setSelectedEpayMethod(props.epayMethods[0].type)
-    } else if (!props.open) {
+    if (!props.open) {
       setSelectedEpayMethod('')
+      return
     }
-  }, [props.open, props.epayMethods])
+    const currentPlan = props.plan?.plan
+    if (!currentPlan) return
+    const currentHasWaffoPancake =
+      props.enableWaffoPancake && !!currentPlan.waffo_pancake_product_id
+    const methods = (props.epayMethods || []).filter((m) => {
+      if (m.type === 'waffo_pancake') return currentHasWaffoPancake
+      return props.enableOnlineTopUp
+    })
+    if (methods.length > 0) {
+      setSelectedEpayMethod(methods[0].type)
+    }
+  }, [
+    props.open,
+    props.epayMethods,
+    props.plan,
+    props.enableWaffoPancake,
+    props.enableOnlineTopUp,
+  ])
+  // ===== CUSTOM END =====
 
   const plan = props.plan?.plan
   if (!plan) return null
@@ -87,12 +105,16 @@ export function SubscriptionPurchaseDialog(props: Props) {
   const hasCreem = props.enableCreem && !!plan.creem_product_id
   const hasWaffoPancake =
     props.enableWaffoPancake && !!plan.waffo_pancake_product_id
-  const hasEpay =
-    props.enableOnlineTopUp && (props.epayMethods || []).length > 0
-  const hasAnyPayment = hasStripe || hasCreem || hasWaffoPancake || hasEpay
+  // ===== CUSTOM START: 下拉框选项按 plan 支持情况过滤 waffo_pancake，按 enableOnlineTopUp 过滤 epay 方式 =====
+  const availableEpayMethods = (props.epayMethods || []).filter((m) => {
+    if (m.type === 'waffo_pancake') return hasWaffoPancake
+    return props.enableOnlineTopUp
+  })
+  const hasEpay = availableEpayMethods.length > 0
+  // ===== CUSTOM END =====
+  const hasAnyPayment = hasStripe || hasCreem || hasEpay
   const selectedEpayMethodLabel =
-    (props.epayMethods || []).find((m) => m.type === selectedEpayMethod)
-      ?.name ||
+    availableEpayMethods.find((m) => m.type === selectedEpayMethod)?.name ||
     selectedEpayMethod ||
     t('Select payment method')
   const totalAmount = Number(plan.total_amount || 0)
@@ -188,6 +210,12 @@ export function SubscriptionPurchaseDialog(props: Props) {
       toast.error(t('Please select a payment method'))
       return
     }
+    // ===== CUSTOM START: waffo_pancake 走独立支付网关，不走 epay =====
+    if (selectedEpayMethod === 'waffo_pancake') {
+      await handlePayWaffoPancake()
+      return
+    }
+    // ===== CUSTOM END =====
     setPaying(true)
     try {
       const res = await paySubscriptionEpay({
@@ -370,7 +398,8 @@ export function SubscriptionPurchaseDialog(props: Props) {
             <p className='text-muted-foreground text-xs'>
               {t('Select payment method')}
             </p>
-            {(hasStripe || hasCreem || hasWaffoPancake) && (
+            {/* ===== CUSTOM START: 移除独立 Waffo Pancake 按钮，统一进下拉框按类型路由 ===== */}
+            {(hasStripe || hasCreem) && (
               <div className='grid grid-cols-2 gap-2 sm:flex'>
                 {hasStripe && (
                   <Button
@@ -392,23 +421,13 @@ export function SubscriptionPurchaseDialog(props: Props) {
                     Creem
                   </Button>
                 )}
-                {hasWaffoPancake && (
-                  <Button
-                    variant='outline'
-                    className='flex-1'
-                    onClick={handlePayWaffoPancake}
-                    disabled={paying || limitReached}
-                  >
-                    Waffo Pancake
-                  </Button>
-                )}
               </div>
             )}
             {hasEpay && (
               <div className='grid grid-cols-[minmax(0,1fr)_auto] gap-2'>
                 <Select
                   items={[
-                    ...(props.epayMethods || []).map((m) => ({
+                    ...availableEpayMethods.map((m) => ({
                       value: m.type,
                       label: m.name || m.type,
                     })),
@@ -422,7 +441,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
                   </SelectTrigger>
                   <SelectContent alignItemWithTrigger={false}>
                     <SelectGroup>
-                      {(props.epayMethods || []).map((m) => (
+                      {availableEpayMethods.map((m) => (
                         <SelectItem key={m.type} value={m.type}>
                           {m.name || m.type}
                         </SelectItem>
@@ -438,6 +457,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
                 </Button>
               </div>
             )}
+            {/* ===== CUSTOM END ===== */}
           </div>
         )}
       </div>
