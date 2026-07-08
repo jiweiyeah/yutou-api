@@ -103,7 +103,7 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("SUB:%s", plan.Title),
 		Money:          strconv.FormatFloat(plan.PriceAmount, 'f', 2, 64),
-		Device:         epay.PC,
+		Device:         detectEpayDevice(c),
 		NotifyUrl:      notifyUrl,
 		ReturnUrl:      returnUrl,
 	})
