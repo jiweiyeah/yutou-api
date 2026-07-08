@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -147,23 +146,6 @@ func GetEpayClient() *epay.Client {
 	return withUrl
 }
 
-// detectEpayDevice 根据请求 User-Agent 判断设备类型
-// 移动端返回 epay.MOBILE（H5 原生支付），PC 返回 epay.PC（收银台扫码）
-func detectEpayDevice(c *gin.Context) epay.DeviceType {
-	ua := c.Request.UserAgent()
-	if ua == "" {
-		return epay.PC
-	}
-	// 移动端特征关键词（iPad 归 PC，按桌面扫码流程处理）
-	mobileKeywords := []string{"Mobile", "Android", "iPhone", "iPod", "Windows Phone"}
-	for _, kw := range mobileKeywords {
-		if strings.Contains(ua, kw) {
-			return epay.MOBILE
-		}
-	}
-	return epay.PC
-}
-
 func getPayMoney(amount int64, group string) float64 {
 	dAmount := decimal.NewFromInt(amount)
 	// 充值金额以“展示类型”为准：
@@ -248,7 +230,7 @@ func RequestEpay(c *gin.Context) {
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("TUC%d", req.Amount),
 		Money:          strconv.FormatFloat(payMoney, 'f', 2, 64),
-		Device:         detectEpayDevice(c),
+		Device:         epay.PC,
 		NotifyUrl:      notifyUrl,
 		ReturnUrl:      returnUrl,
 	})

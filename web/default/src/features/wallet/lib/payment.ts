@@ -49,10 +49,8 @@ export function submitPaymentForm(
   form.action = url
   form.method = 'POST'
 
-  // 移动端当前页跳转（拉起 App 后避免残留僵尸 tab）
-  // PC 端非 Safari 开新 tab，Safari 当前页（兼容 Safari 跨页提交限制）
-  const isMobile = /Mobile|Android|iPhone|iPod|Windows Phone/i.test(navigator.userAgent)
-  if (!isMobile && !isSafariBrowser()) {
+  // Don't open in new tab for Safari
+  if (!isSafariBrowser()) {
     form.target = '_blank'
   }
 
