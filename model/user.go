@@ -13,9 +13,65 @@ import (
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const UserNameMaxLength = 20
+
+var userSortColumns = map[string]string{
+	"id":            "id",
+	"username":      "username",
+	"quota":         "quota",
+	"group":         "group",
+	"created_at":    "created_at",
+	"last_login_at": "last_login_at",
+}
+
+type UserSortOptions struct {
+	SortBy    string
+	SortOrder string
+}
+
+func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
+	normalizedSortBy := strings.ToLower(strings.TrimSpace(sortBy))
+	normalizedSortOrder := strings.ToLower(strings.TrimSpace(sortOrder))
+	if _, ok := userSortColumns[normalizedSortBy]; !ok {
+		normalizedSortBy = "id"
+		normalizedSortOrder = "desc"
+	} else if normalizedSortOrder != "asc" {
+		normalizedSortOrder = "desc"
+	}
+
+	return UserSortOptions{
+		SortBy:    normalizedSortBy,
+		SortOrder: normalizedSortOrder,
+	}
+}
+
+func (options UserSortOptions) Apply(query *gorm.DB) *gorm.DB {
+	columnName, ok := userSortColumns[options.SortBy]
+	if !ok {
+		columnName = "id"
+	}
+	q := query.Order(clause.OrderByColumn{
+		Column: clause.Column{Name: columnName},
+		Desc:   options.SortOrder != "asc",
+	})
+	if columnName != "id" {
+		q = q.Order(clause.OrderByColumn{
+			Column: clause.Column{Name: "id"},
+			Desc:   true,
+		})
+	}
+	return q
+}
+
+func resolveUserSortOptions(sortOptions []UserSortOptions) UserSortOptions {
+	if len(sortOptions) == 0 {
+		return NewUserSortOptions("", "")
+	}
+	return sortOptions[0]
+}
 
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
@@ -345,12 +401,8 @@ func HardDeleteUserById(id int) error {
 	if id == 0 {
 		return errors.New("id 为空！")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		if err := deleteUserOAuthBindingsByUserId(tx, id); err != nil {
-			return err
-		}
-		return tx.Unscoped().Delete(&User{}, "id = ?", id).Error
-	})
+	user := User{Id: id}
+	return user.HardDelete()
 }
 
 func inviteUser(inviterId int) (err error) {
@@ -676,12 +728,42 @@ func (user *User) HardDelete() error {
 	if user.Id == 0 {
 		return errors.New("id 为空！")
 	}
-	return DB.Transaction(func(tx *gorm.DB) error {
-		if err := deleteUserOAuthBindingsByUserId(tx, user.Id); err != nil {
+	var tokens []Token
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if common.RedisEnabled {
+			if err := tx.Unscoped().Select("id", commonKeyCol).Where("user_id = ?", user.Id).Find(&tokens).Error; err != nil {
+				return err
+			}
+		}
+		if err := deleteUserAuthenticationData(tx, user.Id); err != nil {
 			return err
 		}
 		return tx.Unscoped().Delete(user).Error
 	})
+	if err != nil {
+		return err
+	}
+	if err := invalidateTokensCache(tokens); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate token cache after hard deleting user %d: %v", user.Id, err))
+	}
+	if err := invalidateUserCache(user.Id); err != nil {
+		common.SysError(fmt.Sprintf("failed to invalidate user cache after hard deleting user %d: %v", user.Id, err))
+	}
+	return nil
+}
+
+func deleteUserAuthenticationData(tx *gorm.DB, userId int) error {
+	for _, authenticationData := range []any{
+		&TwoFABackupCode{},
+		&TwoFA{},
+		&PasskeyCredential{},
+		&Token{},
+	} {
+		if err := tx.Unscoped().Where("user_id = ?", userId).Delete(authenticationData).Error; err != nil {
+			return err
+		}
+	}
+	return deleteUserOAuthBindingsByUserId(tx, userId)
 }
 
 // ValidateAndFill check password & user status

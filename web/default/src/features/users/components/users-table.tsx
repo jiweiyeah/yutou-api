@@ -40,12 +40,21 @@ import {
   getSubscriptionStatusOptions,
   isUserDeleted,
 } from '../constants'
-import type { User } from '../types'
+import type { User, UserSortBy } from '../types'
 import { DataTableBulkActions } from './data-table-bulk-actions'
 import { useUsersColumns } from './users-columns'
 import { useUsers } from './users-provider'
 
 const route = getRouteApi('/_authenticated/users/')
+
+const USER_SORTABLE_COLUMNS = new Set<UserSortBy>([
+  'id',
+  'username',
+  'quota',
+  'group',
+  'created_at',
+  'last_login_at',
+])
 
 function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
@@ -56,6 +65,7 @@ export function UsersTable() {
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
+  const [sorting, setSorting] = useState<SortingState>([])
 
   const {
     globalFilter,
@@ -98,6 +108,28 @@ export function UsersTable() {
       | undefined) ?? []
   // ===== CUSTOM END =====
 
+  const sortParams = useMemo(() => {
+    const activeSort = sorting[0]
+    if (
+      !activeSort ||
+      !USER_SORTABLE_COLUMNS.has(activeSort.id as UserSortBy)
+    ) {
+      return {}
+    }
+
+    return {
+      sort_by: activeSort.id as UserSortBy,
+      sort_order: activeSort.desc ? 'desc' : 'asc',
+    } as const
+  }, [sorting])
+
+  const handleSortingChange: OnChangeFn<SortingState> = (updater) => {
+    setSorting(updater)
+    if (pagination.pageIndex > 0) {
+      onPaginationChange({ ...pagination, pageIndex: 0 })
+    }
+  }
+
   // Fetch data with React Query
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -131,6 +163,7 @@ export function UsersTable() {
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
+        ...sortParams,
       }
 
       const result =
@@ -191,8 +224,10 @@ export function UsersTable() {
     onPaginationChange,
     onGlobalFilterChange,
     onColumnFiltersChange,
+    onSortingChange: handleSortingChange,
     manualPagination: true,
     manualFiltering: true,
+    manualSorting: true,
     totalCount: data?.total || 0,
     ensurePageInRange,
   })
