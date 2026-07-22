@@ -27,6 +27,9 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+// ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
 
 import { TASK_ACTIONS, TASK_STATUS } from '../../constants'
 import { taskActionMapper, taskStatusMapper } from '../../lib/mappers'
@@ -92,6 +95,9 @@ function AudioPreviewCell({ log }: { log: TaskLog }) {
 
 export function useTaskLogsColumns(isAdmin: boolean): ColumnDef<TaskLog>[] {
   const { t } = useTranslation()
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  const isRoleAdmin = useIsAdmin()
+  // ===== CUSTOM END =====
   const columns: ColumnDef<TaskLog>[] = [
     {
       accessorKey: 'submit_time',
@@ -212,8 +218,12 @@ export function useTaskLogsColumns(isAdmin: boolean): ColumnDef<TaskLog>[] {
         )
       },
     },
-    createProgressColumn<TaskLog>({ headerLabel: t('Progress') }),
-    {
+    createProgressColumn<TaskLog>({ headerLabel: t('Progress') })
+  )
+
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+  if (isRoleAdmin) {
+    columns.push({
       accessorKey: 'fail_reason',
       header: t('Details'),
       cell: function DetailsCell({ row }) {
@@ -287,8 +297,9 @@ export function useTaskLogsColumns(isAdmin: boolean): ColumnDef<TaskLog>[] {
       },
       size: 200,
       maxSize: 220,
-    }
-  )
+    })
+  }
+  // ===== CUSTOM END =====
 
   return columns
 }

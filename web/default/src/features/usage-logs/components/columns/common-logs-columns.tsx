@@ -39,6 +39,9 @@ import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+// ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
 
 import { LOG_TYPE_ALL_VALUE } from '../../constants'
 import type { UsageLog } from '../../data/schema'
@@ -290,6 +293,9 @@ function buildTypeDetailSegments(
 
 export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  const isRoleAdmin = useIsAdmin()
+  // ===== CUSTOM END =====
   const columns: ColumnDef<UsageLog>[] = [
     {
       accessorKey: 'created_at',
@@ -765,9 +771,12 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
           />
         )
       },
-    },
+    }
+  )
 
-    {
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+  if (isRoleAdmin) {
+    columns.push({
       accessorKey: 'content',
       header: t('Details'),
       cell: function DetailsCell({ row }) {
@@ -830,8 +839,9 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
       },
       size: 180,
       maxSize: 200,
-    }
-  )
+    })
+  }
+  // ===== CUSTOM END =====
 
   return columns
 }
