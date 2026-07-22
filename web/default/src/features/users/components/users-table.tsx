@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { SortingState } from '@tanstack/react-table'
@@ -87,9 +87,6 @@ export function UsersTable() {
       { columnId: 'subscription', searchKey: 'sub_status', type: 'array' }, // ===== CUSTOM =====
     ],
   })
-  // ===== CUSTOM START: local sorting state for total_topup server-side ordering =====
-  const [sorting, setSorting] = useState<SortingState>([])
-  // ===== CUSTOM END =====
   const statusFilter =
     (columnFilters.find((filter) => filter.id === 'status')?.value as
       | string[]
