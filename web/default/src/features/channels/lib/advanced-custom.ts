@@ -59,11 +59,6 @@ export const ADVANCED_CUSTOM_CONVERTER_OPTIONS: Array<{
     triggerLabel: 'To OpenAI Chat',
   },
   {
-    value: 'openai_responses_to_openai_chat_completions_lovable',
-    label: 'OpenAI Responses to OpenAI Chat (Lovable)',
-    triggerLabel: 'To OpenAI Chat (Lovable)',
-  },
-  {
     value: 'openai_responses_to_gemini_generate_content',
     label: 'OpenAI Responses to Gemini Generate Content',
     triggerLabel: 'To Gemini Generate Content',
@@ -392,8 +387,7 @@ export function getAdvancedCustomConverterDefaults(
   if (
     converter === 'anthropic_messages_to_openai_chat_completions' ||
     converter === 'gemini_generate_content_to_openai_chat_completions' ||
-    converter === 'openai_responses_to_openai_chat_completions' ||
-    converter === 'openai_responses_to_openai_chat_completions_lovable'
+    converter === 'openai_responses_to_openai_chat_completions'
   ) {
     return { upstream_path: openAIChatPath, auth: bearerHeaderAuth() }
   }
@@ -850,10 +844,7 @@ function isConverterPathAllowed(
   ) {
     return incomingPath === '/v1/chat/completions'
   }
-  if (
-    converter === 'openai_responses_to_openai_chat_completions' ||
-    converter === 'openai_responses_to_openai_chat_completions_lovable'
-  ) {
+  if (converter === 'openai_responses_to_openai_chat_completions') {
     return incomingPath === '/v1/responses'
   }
   if (converter === 'openai_responses_to_gemini_generate_content') {

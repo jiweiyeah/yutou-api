@@ -23,11 +23,7 @@ import (
 	"github.com/samber/lo"
 )
 
-const (
-	ChannelName = "advanced_custom"
-
-	ConverterOpenAIResponsesToOpenAIChatLovable = "openai_responses_to_openai_chat_completions_lovable"
-)
+const ChannelName = "advanced_custom"
 
 const advancedCustomModelPlaceholder = "{model}"
 
@@ -127,33 +123,14 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	switch converter {
 	case relayconvert.ConverterNone:
 		return a.convertOpenAICompatibleResponsesRequest(c, info, request)
-	case relayconvert.ConverterOpenAIResponsesToOpenAIChat,
-		ConverterOpenAIResponsesToOpenAIChatLovable:
-		conversionRequest := request
-		if converter == ConverterOpenAIResponsesToOpenAIChatLovable {
-			if err := prepareLovableResponsesRequest(&conversionRequest); err != nil {
-				return nil, err
-			}
-		}
-		result, err := service.ConvertRequestByID(c, info, relayconvert.ConverterOpenAIResponsesToOpenAIChat, conversionRequest)
+	case relayconvert.ConverterOpenAIResponsesToOpenAIChat:
+		result, err := service.ConvertRequestByID(c, info, converter, request)
 		if err != nil {
 			return nil, err
 		}
 		chatRequest, ok := result.Value.(*dto.GeneralOpenAIRequest)
 		if !ok {
 			return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
-		}
-		if converter == ConverterOpenAIResponsesToOpenAIChatLovable {
-			chatRequest.Tools, err = normalizeLovableChatTools(chatRequest.Tools)
-			if err != nil {
-				return nil, err
-			}
-			if len(chatRequest.Tools) == 0 {
-				chatRequest.ToolChoice = nil
-				chatRequest.ParallelTooCalls = nil
-			} else if chatRequest.ReasoningEffort != "" {
-				chatRequest.ReasoningEffort = "none"
-			}
 		}
 		return a.convertOpenAICompatibleRequest(c, info, chatRequest)
 	case relayconvert.ConverterOpenAIResponsesToGemini:
@@ -334,11 +311,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			return openai.OaiChatToResponsesStreamHandler(c, info, resp)
 		}
 		return openai.OaiChatToResponsesHandler(c, info, resp)
-	case ConverterOpenAIResponsesToOpenAIChatLovable:
-		if info.IsStream {
-			return lovableChatToResponsesStreamHandler(c, info, resp)
-		}
-		return lovableChatToResponsesHandler(c, info, resp)
 	default:
 		return nil, types.NewOpenAIError(fmt.Errorf("unsupported advanced custom converter: %s", a.converter), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}

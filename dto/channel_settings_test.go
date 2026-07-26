@@ -21,17 +21,6 @@ func TestAdvancedCustomValidateResponsesToChatConverterPath(t *testing.T) {
 	}
 	require.NoError(t, valid.Validate())
 
-	validLovable := &AdvancedCustomConfig{
-		Routes: []AdvancedCustomRoute{
-			{
-				IncomingPath: "/v1/responses",
-				UpstreamPath: "/v1/chat/completions",
-				Converter:    advancedCustomConverterLovable,
-			},
-		},
-	}
-	require.NoError(t, validLovable.Validate())
-
 	validGemini := &AdvancedCustomConfig{
 		Routes: []AdvancedCustomRoute{
 			{
@@ -51,27 +40,21 @@ func TestAdvancedCustomValidateResponsesToChatConverterPath(t *testing.T) {
 		{name: "responses compact", incomingPath: "/v1/responses/compact"},
 	}
 
-	converters := []string{
-		advancedCustomConverterOpenAIResponsesToOpenAIChat,
-		advancedCustomConverterLovable,
-	}
 	for _, tt := range tests {
-		for _, converter := range converters {
-			t.Run(tt.name+"/"+converter, func(t *testing.T) {
-				config := &AdvancedCustomConfig{
-					Routes: []AdvancedCustomRoute{
-						{
-							IncomingPath: tt.incomingPath,
-							UpstreamPath: "/v1/chat/completions",
-							Converter:    converter,
-						},
+		t.Run(tt.name, func(t *testing.T) {
+			config := &AdvancedCustomConfig{
+				Routes: []AdvancedCustomRoute{
+					{
+						IncomingPath: tt.incomingPath,
+						UpstreamPath: "/v1/chat/completions",
+						Converter:    advancedCustomConverterOpenAIResponsesToOpenAIChat,
 					},
-				}
-				err := config.Validate()
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "converter does not match incoming_path")
-			})
-		}
+				},
+			}
+			err := config.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "converter does not match incoming_path")
+		})
 	}
 }
 
