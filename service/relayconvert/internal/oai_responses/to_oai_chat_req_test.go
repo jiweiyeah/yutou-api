@@ -81,6 +81,15 @@ func TestResponsesRequestToChatCompletionsRequestMultimodalInput(t *testing.T) {
 	assert.Equal(t, "look", parts[0].Text)
 	assert.Equal(t, dto.ContentTypeImageURL, parts[1].Type)
 	assert.Equal(t, "https://example.test/a.png", parts[1].GetImageMedia().Url)
+	assert.Equal(t, "low", parts[1].GetImageMedia().Detail)
+	content, ok := got.Messages[0].Content.([]any)
+	require.True(t, ok)
+	imagePart, ok := content[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{
+		"url":    "https://example.test/a.png",
+		"detail": "low",
+	}, imagePart["image_url"])
 	assert.Equal(t, dto.ContentTypeFile, parts[2].Type)
 	assert.Equal(t, "file_1", parts[2].GetFile().FileId)
 	assert.Equal(t, dto.ContentTypeInputAudio, parts[3].Type)
