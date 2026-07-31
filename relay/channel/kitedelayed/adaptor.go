@@ -3,6 +3,7 @@ package kitedelayed
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,7 @@ const (
 	maximumRequestSize = 32 << 20
 	maximumBodySize    = 64 << 20
 	pollTimeout        = 5 * time.Minute
+	clientClosedStatus = 499
 )
 
 var (
@@ -203,7 +205,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		statusResp, err := a.doJSONRequest(c, info, pollCtx, http.MethodGet, statusURL, nil)
 		if err != nil {
 			if pollCtx.Err() != nil {
-				return nil, kiteRequestError("poll", pollCtx.Err(), http.StatusGatewayTimeout)
+				return nil, kitePollContextError(pollCtx.Err())
 			}
 			return nil, kiteRequestError("poll", err, http.StatusBadGateway)
 		}
@@ -226,13 +228,18 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 			if err != nil {
 				return nil, kiteRequestError("fetch result", err, http.StatusBadGateway)
 			}
+			resultBody, readErr := readAndCloseResponse(resultResp, maximumBodySize)
+			if readErr != nil {
+				return nil, kiteRequestError("read result response", readErr, http.StatusBadGateway)
+			}
 			if resultResp.StatusCode < http.StatusOK || resultResp.StatusCode >= http.StatusMultipleChoices {
-				resultBody, readErr := readAndCloseResponse(resultResp, maximumBodySize)
-				if readErr != nil {
-					return nil, kiteRequestError("read result response", readErr, http.StatusBadGateway)
-				}
 				return nil, kiteHTTPError("fetch result", resultResp.StatusCode, resultBody)
 			}
+
+			// The result request uses pollCtx. Buffer it before DoRequest returns so
+			// the deferred cancel cannot invalidate the body consumed by DoResponse.
+			resultResp.Body = io.NopCloser(bytes.NewReader(resultBody))
+			resultResp.ContentLength = int64(len(resultBody))
 			return resultResp, nil
 		case "queued", "running", "pending", "processing", "in_progress":
 			// Keep polling below.
@@ -257,7 +264,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return nil, kiteRequestError("poll", pollCtx.Err(), http.StatusGatewayTimeout)
+			return nil, kitePollContextError(pollCtx.Err())
 		case <-timer.C:
 		}
 	}
@@ -265,16 +272,17 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
 	if !info.IsStream {
-		return a.Adaptor.DoResponse(c, resp, info)
+		usage, apiErr := a.Adaptor.DoResponse(c, resp, info)
+		return usage, kitePostSubmitError(apiErr)
 	}
 
 	resultBody, err := readAndCloseResponse(resp, maximumBodySize)
 	if err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
 	}
 	streamBody, err := buildChatCompletionStream(resultBody)
 	if err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
 	}
 
 	streamResp := &http.Response{
@@ -284,7 +292,8 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	}
 	streamResp.Header.Set("Content-Type", "text/event-stream")
 	helper.SetEventStreamHeaders(c)
-	return a.Adaptor.DoResponse(c, streamResp, info)
+	usage, apiErr := a.Adaptor.DoResponse(c, streamResp, info)
+	return usage, kitePostSubmitError(apiErr)
 }
 
 func (a *Adaptor) GetModelList() []string {
@@ -493,6 +502,26 @@ func kiteRequestError(operation string, err error, statusCode int) *types.NewAPI
 		statusCode,
 		types.ErrOptionWithSkipRetry(),
 	)
+}
+
+func kitePollContextError(err error) *types.NewAPIError {
+	if errors.Is(err, context.Canceled) {
+		return types.NewErrorWithStatusCode(
+			fmt.Errorf("Kite Delayed poll canceled by client: %w", err),
+			types.ErrorCodeDoRequestFailed,
+			clientClosedStatus,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	return kiteRequestError("poll", err, http.StatusGatewayTimeout)
+}
+
+func kitePostSubmitError(err *types.NewAPIError) *types.NewAPIError {
+	if err == nil {
+		return nil
+	}
+	types.ErrOptionWithSkipRetry()(err)
+	return err
 }
 
 func kiteHTTPError(operation string, statusCode int, body []byte) *types.NewAPIError {

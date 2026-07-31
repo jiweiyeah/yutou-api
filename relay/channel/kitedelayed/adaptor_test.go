@@ -1,7 +1,9 @@
 package kitedelayed
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -122,6 +124,124 @@ func TestAdaptorDoRequestMarksFailedJobAsNonRetryable(t *testing.T) {
 	assert.True(t, types.IsSkipRetryError(apiErr), "a submitted paid job must not be duplicated by relay retry")
 	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
 	assert.Contains(t, apiErr.Error(), "provider rejected the request")
+}
+
+func TestAdaptorDoRequestBuffersResultBeforePollContextCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	resultBody, err := common.Marshal(chatCompletionResult())
+	require.NoError(t, err)
+
+	client := service.GetHttpClient()
+	require.NotNil(t, client)
+	originalTransport := client.Transport
+	client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body []byte
+		switch req.URL.Path {
+		case submitPath:
+			body = []byte(`{"id":"job_buffered","status":"queued"}`)
+		case "/v1/delayed/jobs/job_buffered":
+			body = []byte(`{"id":"job_buffered","status":"succeeded"}`)
+		case "/v1/delayed/jobs/job_buffered/result":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: &contextReadCloser{
+					ctx:    req.Context(),
+					reader: bytes.NewReader(resultBody),
+				},
+				Request: req,
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() {
+		client.Transport = originalTransport
+	})
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo("https://example.com", false)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	response, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+	require.NoError(t, err)
+	httpResp := response.(*http.Response)
+
+	usageValue, apiErr := adaptor.DoResponse(ctx, httpResp, info)
+	require.Nil(t, apiErr)
+	usage, ok := usageValue.(*dto.Usage)
+	require.True(t, ok)
+	assert.Equal(t, 13, usage.PromptTokens)
+	assert.Equal(t, 8, usage.CompletionTokens)
+}
+
+func TestAdaptorDoResponseMarksPostSubmitErrorsAsNonRetryable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+			info := testRelayInfo("https://example.com", stream)
+			adaptor := &Adaptor{}
+			adaptor.Init(info)
+
+			response := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       &failingReadCloser{err: context.Canceled},
+			}
+
+			_, apiErr := adaptor.DoResponse(ctx, response, info)
+			require.NotNil(t, apiErr)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Contains(t, apiErr.Error(), context.Canceled.Error())
+		})
+	}
+}
+
+func TestAdaptorDoRequestReportsClientCancellationWithoutGatewayTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case submitPath:
+			writeJSONResponse(t, w, http.StatusAccepted, map[string]any{"id": "job_canceled", "status": "queued"})
+		case "/v1/delayed/jobs/job_canceled":
+			cancel()
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")).WithContext(requestCtx)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo(server.URL, false)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+	require.Error(t, err)
+
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, clientClosedStatus, apiErr.StatusCode)
+	assert.True(t, types.IsSkipRetryError(apiErr))
+	assert.Contains(t, apiErr.Error(), "canceled by client")
 }
 
 func TestAdaptorDoRequestKeepsSlowStreamAliveUntilRequestTimeout(t *testing.T) {
@@ -370,4 +490,40 @@ func writeJSONResponse(t *testing.T, w http.ResponseWriter, statusCode int, valu
 	if _, err := w.Write(body); err != nil {
 		t.Errorf("write test response: %v", err)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type contextReadCloser struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReadCloser) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
+}
+
+func (r *contextReadCloser) Close() error {
+	return nil
+}
+
+type failingReadCloser struct {
+	err error
+}
+
+func (r *failingReadCloser) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r *failingReadCloser) Close() error {
+	return nil
 }
