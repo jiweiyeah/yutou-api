@@ -1,6 +1,7 @@
 package kitedelayed
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -120,6 +122,52 @@ func TestAdaptorDoRequestMarksFailedJobAsNonRetryable(t *testing.T) {
 	assert.True(t, types.IsSkipRetryError(apiErr), "a submitted paid job must not be duplicated by relay retry")
 	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
 	assert.Contains(t, apiErr.Error(), "provider rejected the request")
+}
+
+func TestAdaptorDoRequestKeepsSlowStreamAliveUntilRequestTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.Equal(t, 5*time.Minute, pollTimeout)
+
+	originalPollInterval := pollInterval
+	originalHeartbeatInterval := pollHeartbeatInterval
+	pollInterval = 5 * time.Millisecond
+	pollHeartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		pollInterval = originalPollInterval
+		pollHeartbeatInterval = originalHeartbeatInterval
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case submitPath:
+			writeJSONResponse(t, w, http.StatusAccepted, map[string]any{"id": "job_slow", "status": "queued"})
+		case "/v1/delayed/jobs/job_slow":
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{"id": "job_slow", "status": "running"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")).WithContext(requestCtx)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo(server.URL, true)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+	require.Error(t, err)
+
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusGatewayTimeout, apiErr.StatusCode)
+	assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+	assert.Contains(t, recorder.Body.String(), ": PING\n\n")
+	assert.True(t, info.IsStream)
 }
 
 func TestAdaptorDoResponseSynthesizesOpenAIStream(t *testing.T) {
