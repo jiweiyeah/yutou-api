@@ -84,6 +84,7 @@ const TYPE_LABEL: Record<string, string> = {
   model_update: 'Batch upstream model update',
   midjourney_poll: 'Drawing task polling',
   async_task_poll: 'Async task polling',
+  kite_credits: 'Kite credits scan',
 }
 
 const TYPE_DISPLAY_ID: Record<string, string> = {

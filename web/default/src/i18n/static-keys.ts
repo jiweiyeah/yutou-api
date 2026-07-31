@@ -526,6 +526,7 @@ export const STATIC_I18N_KEYS = [
   'Upstream model updates applied: {{added}} added, {{removed}} removed, {{ignored}} ignored this time, {{totalIgnored}} total ignored models',
   'Batch processing failed',
   'Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed',
+  'Kite credits scan',
   'Detection failed',
   'Detection complete: {{add}} to add, {{remove}} to remove',
   'Batch detection failed',

@@ -781,6 +781,105 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	return true
 }
 
+// AutoDisableChannelKeys disables several exhausted keys with one database
+// write. Keys that were removed or already disabled while the caller was
+// checking balances are ignored. The channel itself is disabled only when no
+// enabled keys remain.
+func AutoDisableChannelKeys(channelId int, reasonsByKey map[string]string) (int, error) {
+	if len(reasonsByKey) == 0 {
+		return 0, nil
+	}
+
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	var (
+		channel        Channel
+		previousStatus int
+		disabledCount  int
+	)
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status != common.ChannelStatusEnabled || !channel.GetAutoBan() {
+			return nil
+		}
+
+		previousStatus = channel.Status
+		keys := channel.GetKeys()
+		if !channel.ChannelInfo.IsMultiKey {
+			reason, ok := reasonsByKey[strings.TrimSpace(channel.Key)]
+			if !ok {
+				return nil
+			}
+			channel.Status = common.ChannelStatusAutoDisabled
+			info := channel.GetOtherInfo()
+			info["status_reason"] = reason
+			info["status_time"] = common.GetTimestamp()
+			channel.SetOtherInfo(info)
+			disabledCount = 1
+		} else {
+			if channel.ChannelInfo.MultiKeyStatusList == nil {
+				channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
+				channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledTime == nil {
+				channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+			}
+
+			now := common.GetTimestamp()
+			for index, key := range keys {
+				reason, ok := reasonsByKey[strings.TrimSpace(key)]
+				if !ok {
+					continue
+				}
+				if status, exists := channel.ChannelInfo.MultiKeyStatusList[index]; exists && status != common.ChannelStatusEnabled {
+					continue
+				}
+				channel.ChannelInfo.MultiKeyStatusList[index] = common.ChannelStatusAutoDisabled
+				channel.ChannelInfo.MultiKeyDisabledReason[index] = reason
+				channel.ChannelInfo.MultiKeyDisabledTime[index] = now
+				disabledCount++
+			}
+			if disabledCount > 0 && !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+				channel.Status = common.ChannelStatusAutoDisabled
+				info := channel.GetOtherInfo()
+				info["status_reason"] = "All keys are disabled"
+				info["status_time"] = now
+				channel.SetOtherInfo(info)
+			}
+		}
+
+		if disabledCount == 0 {
+			return nil
+		}
+		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+			"channel_info": channel.ChannelInfo,
+			"other_info":   channel.OtherInfo,
+			"status":       channel.Status,
+		}).Error
+	})
+	if err != nil || disabledCount == 0 {
+		return disabledCount, err
+	}
+
+	if previousStatus != channel.Status {
+		if err := UpdateAbilityStatus(channel.Id, channel.Status == common.ChannelStatusEnabled); err != nil {
+			return disabledCount, err
+		}
+		CacheUpdateChannelStatus(channel.Id, channel.Status)
+	}
+	channel.Keys = channel.GetKeys()
+	CacheUpdateChannel(&channel)
+	return disabledCount, nil
+}
+
 func EnableChannelByTag(tag string) error {
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
@@ -1104,6 +1203,16 @@ func GetChannelsByType(startIdx int, num int, idSort bool, channelType int) ([]*
 		order = "id desc"
 	}
 	err := DB.Where("type = ?", channelType).Order(order).Limit(num).Offset(startIdx).Omit("key").Find(&channels).Error
+	return channels, err
+}
+
+// GetEnabledChannelsWithKeysByType returns enabled channels of a provider type
+// with their keys loaded. Balance maintenance jobs use this to avoid an N+1
+// query for multi-key channels.
+func GetEnabledChannelsWithKeysByType(channelType int) ([]*Channel, error) {
+	var channels []*Channel
+	err := DB.Where("type = ? AND status = ?", channelType, common.ChannelStatusEnabled).
+		Order("id asc").Find(&channels).Error
 	return channels, err
 }
 

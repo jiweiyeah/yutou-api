@@ -22,6 +22,36 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(kiteCreditsHandler{})
+}
+
+// kiteCreditsHandler periodically checks Kite Delayed credits and disables
+// keys that are at or below the configured safety threshold.
+type kiteCreditsHandler struct{}
+
+func (kiteCreditsHandler) Type() string { return model.SystemTaskTypeKiteCredits }
+
+func (kiteCreditsHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("KITE_CREDITS_TASK_ENABLED", true)
+}
+
+func (kiteCreditsHandler) Interval() time.Duration {
+	minutes := common.GetEnvOrDefault("KITE_CREDITS_TASK_INTERVAL_MINUTES", 60)
+	if minutes < 1 {
+		minutes = 60
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (kiteCreditsHandler) NewPayload() any { return nil }
+
+func (kiteCreditsHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunKiteCreditsScan(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
