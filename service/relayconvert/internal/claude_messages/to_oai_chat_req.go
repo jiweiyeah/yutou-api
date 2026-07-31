@@ -140,7 +140,10 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 			Role: claudeMessage.Role,
 		}
 		if claudeMessage.IsStringContent() {
-			openAIMessage.SetStringContent(claudeMessage.GetStringContent())
+			content := claudeMessage.GetStringContent()
+			if claudeMessage.Role != "assistant" || strings.TrimSpace(content) != "" {
+				openAIMessage.SetStringContent(content)
+			}
 		} else {
 			content, err := claudeMessage.ParseContent()
 			if err != nil {
@@ -148,16 +151,29 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 			}
 			var toolCalls []dto.ToolCallRequest
 			mediaMessages := make([]dto.MediaContent, 0, len(content))
+			var reasoningContent strings.Builder
 
 			for _, mediaMsg := range content {
 				switch mediaMsg.Type {
 				case "text", "input_text":
+					text := mediaMsg.GetText()
+					if claudeMessage.Role == "assistant" && strings.TrimSpace(text) == "" {
+						continue
+					}
 					message := dto.MediaContent{
 						Type:         "text",
-						Text:         mediaMsg.GetText(),
+						Text:         text,
 						CacheControl: mediaMsg.CacheControl,
 					}
 					mediaMessages = append(mediaMessages, message)
+				case "thinking":
+					if mediaMsg.Thinking == nil || strings.TrimSpace(*mediaMsg.Thinking) == "" {
+						continue
+					}
+					if reasoningContent.Len() > 0 {
+						reasoningContent.WriteString("\n\n")
+					}
+					reasoningContent.WriteString(*mediaMsg.Thinking)
 				case "image":
 					imageData := fmt.Sprintf("data:%s;base64,%s", mediaMsg.Source.MediaType, mediaMsg.Source.Data)
 					mediaMessage := dto.MediaContent{
@@ -199,11 +215,29 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 			if len(toolCalls) > 0 {
 				openAIMessage.SetToolCalls(toolCalls)
 			}
+			if reasoningContent.Len() > 0 {
+				reasoning := reasoningContent.String()
+				openAIMessage.ReasoningContent = &reasoning
+			}
 			if len(mediaMessages) > 0 && len(toolCalls) == 0 {
 				openAIMessage.SetMediaContent(mediaMessages)
 			}
 		}
-		if len(openAIMessage.ParseContent()) > 0 || len(openAIMessage.ToolCalls) > 0 {
+		hasContent := len(openAIMessage.ParseContent()) > 0
+		if openAIMessage.Role == "assistant" {
+			if openAIMessage.IsStringContent() {
+				hasContent = strings.TrimSpace(openAIMessage.StringContent()) != ""
+			} else {
+				hasContent = false
+				for _, mediaMessage := range openAIMessage.ParseContent() {
+					if mediaMessage.Type == dto.ContentTypeText && strings.TrimSpace(mediaMessage.Text) != "" {
+						hasContent = true
+						break
+					}
+				}
+			}
+		}
+		if hasContent || strings.TrimSpace(openAIMessage.GetReasoningContent()) != "" || len(openAIMessage.ToolCalls) > 0 {
 			openAIMessages = append(openAIMessages, openAIMessage)
 		}
 	}

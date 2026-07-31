@@ -51,3 +51,8 @@ bin/channel_result.txt
 .local-tests/
 service/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
+
+# Local deployment credentials, backups, and session-analysis scratch files.
+.tmp_DEPLOY_SSH_KEY
+.tmp_parse_codex.py
+one-api.db.bak.*
