@@ -29,8 +29,12 @@ const (
 	submitPath         = "/v1/delayed/chat/completions"
 	maximumRequestSize = 32 << 20
 	maximumBodySize    = 64 << 20
-	pollInterval       = 500 * time.Millisecond
-	pollTimeout        = 2 * time.Minute
+	pollTimeout        = 5 * time.Minute
+)
+
+var (
+	pollInterval          = 500 * time.Millisecond
+	pollHeartbeatInterval = 15 * time.Second
 )
 
 var ModelList = []string{
@@ -157,6 +161,38 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 	pollCtx, cancel := context.WithTimeout(c.Request.Context(), pollTimeout)
 	defer cancel()
+
+	var stopHeartbeat context.CancelFunc
+	var heartbeatDone <-chan struct{}
+	if clientRequestedStream {
+		heartbeatCtx, stop := context.WithCancel(pollCtx)
+		stopHeartbeat = stop
+		done := make(chan struct{})
+		heartbeatDone = done
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(pollHeartbeatInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					helper.SetEventStreamHeaders(c)
+					helper.ExtendWriteDeadline(c)
+					if err := helper.PingData(c); err != nil {
+						cancel()
+						return
+					}
+				case <-heartbeatCtx.Done():
+					return
+				}
+			}
+		}()
+		defer func() {
+			stopHeartbeat()
+			<-heartbeatDone
+		}()
+	}
 
 	baseURL := strings.TrimRight(info.ChannelBaseUrl, "/")
 	jobID := url.PathEscape(job.ID)
