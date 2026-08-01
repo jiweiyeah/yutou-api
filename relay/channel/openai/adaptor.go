@@ -72,6 +72,25 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	if !ok {
 		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
 	}
+	// OpenAI-compatible upstreams reject assistant messages that contain no
+	// text, reasoning, or tool calls. Keep this final guard here because the
+	// Claude request converter can receive multiple content shapes.
+	aiRequest.Messages = removeEmptyAssistantMessages(aiRequest.Messages)
+	// TokenRouter's Kimi compatibility endpoint validates historical thinking
+	// in `reasoning`; `reasoning_content` alone is rejected with the same empty
+	// assistant error. Mirror the converted Claude thinking into that field.
+	if info != nil && info.ChannelType == constant.ChannelTypeCustom &&
+		strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.tokenrouter.com") &&
+		strings.Contains(strings.ToLower(info.UpstreamModelName), "kimi") {
+		for i := range aiRequest.Messages {
+			message := &aiRequest.Messages[i]
+			if message.Role != "assistant" || message.Reasoning != nil || strings.TrimSpace(message.GetReasoningContent()) == "" {
+				continue
+			}
+			reasoning := message.GetReasoningContent()
+			message.Reasoning = &reasoning
+		}
+	}
 	//if common.DebugEnabled {
 	//	println(fmt.Sprintf("convert claude to openai request result: %s", common.GetJsonString(aiRequest)))
 	//	// Save request body to file for debugging
@@ -87,6 +106,39 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 		}
 	}
 	return a.ConvertOpenAIRequest(c, info, aiRequest)
+}
+
+func removeEmptyAssistantMessages(messages []dto.Message) []dto.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	filtered := make([]dto.Message, 0, len(messages))
+	for _, message := range messages {
+		if message.Role == "assistant" && !assistantMessageHasPayload(&message) {
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+	return filtered
+}
+
+func assistantMessageHasPayload(message *dto.Message) bool {
+	if message == nil {
+		return false
+	}
+	if message.IsStringContent() {
+		return strings.TrimSpace(message.StringContent()) != ""
+	}
+	for _, content := range message.ParseContent() {
+		if content.Type == dto.ContentTypeText && strings.TrimSpace(content.Text) != "" {
+			return true
+		}
+	}
+	if strings.TrimSpace(message.GetReasoningContent()) != "" {
+		return true
+	}
+	return len(message.ParseToolCalls()) > 0
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
