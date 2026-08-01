@@ -73,23 +73,17 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 		return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", result.Value)
 	}
 	// OpenAI-compatible upstreams reject assistant messages that contain no
-	// text, reasoning, or tool calls. Keep this final guard here because the
-	// Claude request converter can receive multiple content shapes.
+	// text, reasoning, or tool calls. Keep this final guard because Claude
+	// requests can contain empty content blocks.
 	aiRequest.Messages = removeEmptyAssistantMessages(aiRequest.Messages)
-	// TokenRouter's Kimi compatibility endpoint validates historical thinking
-	// in `reasoning`; `reasoning_content` alone is rejected with the same empty
-	// assistant error. Mirror the converted Claude thinking into that field.
+	// TokenRouter's Kimi compatibility endpoint only recognizes historical
+	// assistant text when content is a string, and uses `reasoning` for prior
+	// thinking. Normalize only this provider/model combination so other
+	// OpenAI-compatible channels keep their original message shapes.
 	if info != nil && info.ChannelType == constant.ChannelTypeCustom &&
 		strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.tokenrouter.com") &&
 		strings.Contains(strings.ToLower(info.UpstreamModelName), "kimi") {
-		for i := range aiRequest.Messages {
-			message := &aiRequest.Messages[i]
-			if message.Role != "assistant" || message.Reasoning != nil || strings.TrimSpace(message.GetReasoningContent()) == "" {
-				continue
-			}
-			reasoning := message.GetReasoningContent()
-			message.Reasoning = &reasoning
-		}
+		aiRequest.Messages = normalizeTokenRouterAssistantMessages(aiRequest.Messages)
 	}
 	//if common.DebugEnabled {
 	//	println(fmt.Sprintf("convert claude to openai request result: %s", common.GetJsonString(aiRequest)))
@@ -121,6 +115,40 @@ func removeEmptyAssistantMessages(messages []dto.Message) []dto.Message {
 		filtered = append(filtered, message)
 	}
 	return filtered
+}
+
+func normalizeTokenRouterAssistantMessages(messages []dto.Message) []dto.Message {
+	for i := range messages {
+		message := &messages[i]
+		if message.Role != "assistant" {
+			continue
+		}
+
+		// Claude history commonly arrives as [{"type":"text", ...}], but
+		// TokenRouter validates assistant text only when content is a string.
+		if !message.IsStringContent() {
+			content := message.ParseContent()
+			if len(content) > 0 {
+				var text strings.Builder
+				for _, part := range content {
+					if part.Type == dto.ContentTypeText {
+						text.WriteString(part.Text)
+					}
+				}
+				if strings.TrimSpace(text.String()) != "" {
+					message.SetStringContent(text.String())
+				} else {
+					message.SetNullContent()
+				}
+			}
+		}
+
+		if message.Reasoning == nil && strings.TrimSpace(message.GetReasoningContent()) != "" {
+			reasoning := message.GetReasoningContent()
+			message.Reasoning = &reasoning
+		}
+	}
+	return removeEmptyAssistantMessages(messages)
 }
 
 func assistantMessageHasPayload(message *dto.Message) bool {

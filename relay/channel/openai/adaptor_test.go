@@ -79,6 +79,39 @@ func TestConvertClaudeRequestMirrorsKimiReasoningForCustomChannel(t *testing.T) 
 	assert.Equal(t, "previous thought", *openAIRequest.Messages[0].Reasoning)
 }
 
+func TestConvertClaudeRequestNormalizesTokenRouterAssistantTextBlocks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	firstText := "Earlier "
+	secondText := "answer"
+	request := &dto.ClaudeRequest{
+		Model: "moonshotai/kimi-k3-free",
+		Messages: []dto.ClaudeMessage{
+			{Role: "user", Content: "Question"},
+			{Role: "assistant", Content: []dto.ClaudeMediaMessage{
+				{Type: "text", Text: &firstText},
+				{Type: "text", Text: &secondText},
+			}},
+			{Role: "user", Content: "Continue"},
+		},
+	}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeCustom,
+			ChannelBaseUrl:    "https://api.tokenrouter.com/v1/chat/completions",
+			UpstreamModelName: "moonshotai/kimi-k3-free",
+		},
+	}
+
+	converted, err := (&Adaptor{}).ConvertClaudeRequest(c, info, request)
+	require.NoError(t, err)
+	openAIRequest, ok := converted.(*dto.GeneralOpenAIRequest)
+	require.True(t, ok)
+	require.Len(t, openAIRequest.Messages, 3)
+	assert.True(t, openAIRequest.Messages[1].IsStringContent())
+	assert.Equal(t, "Earlier answer", openAIRequest.Messages[1].StringContent())
+}
+
 func TestConvertClaudeRequestDoesNotMirrorReasoningForOtherCustomChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
