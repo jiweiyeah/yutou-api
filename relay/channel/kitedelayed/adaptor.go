@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -149,7 +150,18 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		return nil, kiteRequestError("read submit response", err, http.StatusBadGateway)
 	}
 	if submitResp.StatusCode < http.StatusOK || submitResp.StatusCode >= http.StatusMultipleChoices {
-		return nil, kiteHTTPError("submit", submitResp.StatusCode, submitBody)
+		apiErr := kiteHTTPError("submit", submitResp.StatusCode, submitBody)
+		if submitResp.StatusCode == http.StatusPaymentRequired &&
+			strings.EqualFold(strings.TrimSpace(common.GetContextKeyString(c, constant.ContextKeyChannelName)), "marathon") {
+			var upstreamError struct {
+				Detail string `json:"detail"`
+			}
+			if common.Unmarshal(submitBody, &upstreamError) == nil &&
+				strings.EqualFold(strings.TrimSpace(upstreamError.Detail), "insufficient credits") {
+				types.ErrOptionWithChannelAutoDisable()(apiErr)
+			}
+		}
+		return nil, apiErr
 	}
 
 	var job jobResponse

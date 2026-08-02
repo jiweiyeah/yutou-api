@@ -126,6 +126,78 @@ func TestAdaptorDoRequestMarksFailedJobAsNonRetryable(t *testing.T) {
 	assert.Contains(t, apiErr.Error(), "provider rejected the request")
 }
 
+func TestAdaptorDoRequestAutoDisablesOnlyMarathonOnInsufficientCredits(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = false
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = originalAutomaticDisable
+	})
+
+	tests := []struct {
+		name        string
+		channelName string
+		statusCode  int
+		response    map[string]any
+		wantDisable bool
+	}{
+		{
+			name:        "marathon insufficient credits",
+			channelName: "marathon",
+			statusCode:  http.StatusPaymentRequired,
+			response:    map[string]any{"detail": "insufficient credits"},
+			wantDisable: true,
+		},
+		{
+			name:        "other channel insufficient credits",
+			channelName: "another-kite-channel",
+			statusCode:  http.StatusPaymentRequired,
+			response:    map[string]any{"detail": "insufficient credits"},
+			wantDisable: false,
+		},
+		{
+			name:        "marathon other payment error",
+			channelName: "marathon",
+			statusCode:  http.StatusPaymentRequired,
+			response:    map[string]any{"detail": "payment method required"},
+			wantDisable: false,
+		},
+		{
+			name:        "marathon insufficient credits with other status",
+			channelName: "marathon",
+			statusCode:  http.StatusForbidden,
+			response:    map[string]any{"detail": "insufficient credits"},
+			wantDisable: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSONResponse(t, w, test.statusCode, test.response)
+			}))
+			t.Cleanup(server.Close)
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+			common.SetContextKey(ctx, constant.ContextKeyChannelName, test.channelName)
+			info := testRelayInfo(server.URL, false)
+			adaptor := &Adaptor{}
+			adaptor.Init(info)
+
+			_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+			require.Error(t, err)
+
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, test.wantDisable, types.IsChannelAutoDisableError(apiErr))
+			assert.Equal(t, test.wantDisable, service.ShouldDisableChannel(apiErr))
+			assert.True(t, types.IsSkipRetryError(apiErr))
+		})
+	}
+}
+
 func TestAdaptorDoRequestBuffersResultBeforePollContextCancel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

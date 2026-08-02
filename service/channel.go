@@ -43,10 +43,15 @@ func EnableChannel(channelId int, usingKey string, channelName string) {
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {
-	if !common.AutomaticDisableChannelEnabled {
+	if err == nil {
 		return false
 	}
-	if err == nil {
+	// Explicit provider-scoped disable signals are independent of the global
+	// status-code/keyword auto-disable switch.
+	if types.IsChannelAutoDisableError(err) {
+		return true
+	}
+	if !common.AutomaticDisableChannelEnabled {
 		return false
 	}
 	if types.IsChannelError(err) {
