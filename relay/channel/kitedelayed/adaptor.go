@@ -14,6 +14,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -27,12 +29,13 @@ import (
 )
 
 const (
-	ChannelName        = "kite_delayed"
-	submitPath         = "/v1/delayed/chat/completions"
-	maximumRequestSize = 32 << 20
-	maximumBodySize    = 64 << 20
-	pollTimeout        = 5 * time.Minute
-	clientClosedStatus = 499
+	ChannelName                  = "kite_delayed"
+	submitPath                   = "/v1/delayed/chat/completions"
+	maximumRequestSize           = 32 << 20
+	maximumBodySize              = 64 << 20
+	pollTimeout                  = 5 * time.Minute
+	clientClosedStatus           = 499
+	reservationRetryAfterSeconds = 2
 )
 
 var (
@@ -141,27 +144,84 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	}()
 
 	info.UpstreamRequestBodySize = int64(len(requestJSON))
-	submitResp, err := a.doJSONRequest(c, info, c.Request.Context(), http.MethodPost, submitURL, bytes.NewReader(requestJSON))
-	if err != nil {
-		return nil, kiteRequestError("submit", err, http.StatusBadGateway)
-	}
-	submitBody, err := readAndCloseResponse(submitResp, maximumBodySize)
-	if err != nil {
-		return nil, kiteRequestError("read submit response", err, http.StatusBadGateway)
-	}
-	if submitResp.StatusCode < http.StatusOK || submitResp.StatusCode >= http.StatusMultipleChoices {
-		apiErr := kiteHTTPError("submit", submitResp.StatusCode, submitBody)
-		if submitResp.StatusCode == http.StatusPaymentRequired &&
-			strings.EqualFold(strings.TrimSpace(common.GetContextKeyString(c, constant.ContextKeyChannelName)), "marathon") {
-			var upstreamError struct {
-				Detail string `json:"detail"`
-			}
-			if common.Unmarshal(submitBody, &upstreamError) == nil &&
-				strings.EqualFold(strings.TrimSpace(upstreamError.Detail), "insufficient credits") {
-				types.ErrOptionWithChannelAutoDisable()(apiErr)
-			}
+	var submitBody []byte
+	attemptedKeys := map[string]struct{}{info.ApiKey: {}}
+	for submitAttempt := 0; ; submitAttempt++ {
+		submitResp, err := a.doJSONRequest(c, info, c.Request.Context(), http.MethodPost, submitURL, bytes.NewReader(requestJSON))
+		if err != nil {
+			return nil, kiteRequestError("submit", err, http.StatusBadGateway)
 		}
-		return nil, apiErr
+		submitBody, err = readAndCloseResponse(submitResp, maximumBodySize)
+		if err != nil {
+			return nil, kiteRequestError("read submit response", err, http.StatusBadGateway)
+		}
+		if submitResp.StatusCode >= http.StatusOK && submitResp.StatusCode < http.StatusMultipleChoices {
+			break
+		}
+
+		apiErr := kiteHTTPError("submit", submitResp.StatusCode, submitBody)
+		isMarathon := strings.EqualFold(strings.TrimSpace(common.GetContextKeyString(c, constant.ContextKeyChannelName)), "marathon")
+		if submitResp.StatusCode != http.StatusPaymentRequired || !isMarathon {
+			return nil, apiErr
+		}
+
+		var upstreamError struct {
+			Detail string `json:"detail"`
+		}
+		if common.Unmarshal(submitBody, &upstreamError) != nil {
+			return nil, apiErr
+		}
+
+		switch strings.ToLower(strings.TrimSpace(upstreamError.Detail)) {
+		case "insufficient credits":
+			// This is a definitive key-level credit failure. Preserve the existing
+			// automatic-disable behavior for Marathon only.
+			types.ErrOptionWithChannelAutoDisable()(apiErr)
+			return nil, apiErr
+		case "insufficient credits for concurrent job reservation":
+			// The submit was rejected before a job was created. Rotate only within
+			// this Marathon multi-key channel; submitted jobs remain non-retryable.
+			apiErr.StatusCode = http.StatusServiceUnavailable
+			types.ErrOptionWithRetryAfter(reservationRetryAfterSeconds)(apiErr)
+			if submitAttempt >= common.RetryTimes || !info.ChannelIsMultiKey {
+				return nil, apiErr
+			}
+
+			channel, channelErr := model.CacheGetChannel(info.ChannelId)
+			if channelErr != nil {
+				logger.LogWarn(c, fmt.Sprintf("Kite Delayed Marathon reservation retry could not load channel %d: %v", info.ChannelId, channelErr))
+				return nil, apiErr
+			}
+			var nextKey string
+			var nextIndex int
+			var nextErr *types.NewAPIError
+			for range channel.GetKeys() {
+				nextKey, nextIndex, nextErr = channel.GetNextEnabledKey()
+				if nextErr != nil {
+					break
+				}
+				if _, alreadyAttempted := attemptedKeys[nextKey]; !alreadyAttempted {
+					break
+				}
+				nextKey = ""
+			}
+			if nextErr != nil || strings.TrimSpace(nextKey) == "" {
+				if nextErr != nil {
+					logger.LogWarn(c, fmt.Sprintf("Kite Delayed Marathon reservation retry could not select next key for channel %d: %v", info.ChannelId, nextErr))
+				}
+				return nil, apiErr
+			}
+
+			logger.LogWarn(c, fmt.Sprintf("Kite Delayed Marathon reservation unavailable on key index %d; retrying with key index %d (%d/%d)", info.ChannelMultiKeyIndex, nextIndex, submitAttempt+1, common.RetryTimes))
+			attemptedKeys[nextKey] = struct{}{}
+			info.ApiKey = nextKey
+			info.ChannelMultiKeyIndex = nextIndex
+			common.SetContextKey(c, constant.ContextKeyChannelKey, nextKey)
+			common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, nextIndex)
+			continue
+		default:
+			return nil, apiErr
+		}
 	}
 
 	var job jobResponse

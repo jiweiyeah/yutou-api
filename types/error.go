@@ -92,6 +92,7 @@ type NewAPIError struct {
 	RelayError         any
 	skipRetry          bool
 	autoDisableChannel bool
+	retryAfterSeconds  int
 	recordErrorLog     *bool
 	errorType          ErrorType
 	errorCode          ErrorCode
@@ -387,6 +388,14 @@ func IsChannelAutoDisableError(err *NewAPIError) bool {
 	return err.autoDisableChannel
 }
 
+func GetRetryAfterSeconds(err *NewAPIError) int {
+	if err == nil {
+		return 0
+	}
+
+	return err.retryAfterSeconds
+}
+
 func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.skipRetry = true
@@ -396,6 +405,14 @@ func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 func ErrOptionWithChannelAutoDisable() NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.autoDisableChannel = true
+	}
+}
+
+func ErrOptionWithRetryAfter(seconds int) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		if seconds > 0 {
+			e.retryAfterSeconds = seconds
+		}
 	}
 }
 

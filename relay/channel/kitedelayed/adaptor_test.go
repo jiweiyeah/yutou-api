@@ -16,14 +16,17 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestMain(m *testing.M) {
@@ -196,6 +199,232 @@ func TestAdaptorDoRequestAutoDisablesOnlyMarathonOnInsufficientCredits(t *testin
 			assert.True(t, types.IsSkipRetryError(apiErr))
 		})
 	}
+}
+
+func TestAdaptorDoRequestMapsOnlyMarathonReservationFailuresToTemporaryErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	originalAutomaticDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = originalAutomaticDisable
+	})
+
+	tests := []struct {
+		name           string
+		channelName    string
+		response       map[string]any
+		wantStatus     int
+		wantRetryAfter int
+		wantDisable    bool
+	}{
+		{
+			name:           "marathon reservation failure",
+			channelName:    "marathon",
+			response:       map[string]any{"detail": "insufficient credits for concurrent job reservation"},
+			wantStatus:     http.StatusServiceUnavailable,
+			wantRetryAfter: reservationRetryAfterSeconds,
+		},
+		{
+			name:           "other channel reservation failure",
+			channelName:    "another-kite-channel",
+			response:       map[string]any{"detail": "insufficient credits for concurrent job reservation"},
+			wantStatus:     http.StatusPaymentRequired,
+			wantRetryAfter: 0,
+		},
+		{
+			name:           "marathon exhausted credits remains non-retryable",
+			channelName:    "marathon",
+			response:       map[string]any{"detail": "insufficient credits"},
+			wantStatus:     http.StatusPaymentRequired,
+			wantRetryAfter: 0,
+			wantDisable:    true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSONResponse(t, w, http.StatusPaymentRequired, test.response)
+			}))
+			t.Cleanup(server.Close)
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+			common.SetContextKey(ctx, constant.ContextKeyChannelName, test.channelName)
+			info := testRelayInfo(server.URL, false)
+			adaptor := &Adaptor{}
+			adaptor.Init(info)
+
+			_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+			require.Error(t, err)
+
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.True(t, types.IsSkipRetryError(apiErr), "the adaptor owns reservation retries and must not trigger an outer relay retry")
+			assert.Equal(t, test.wantStatus, apiErr.StatusCode)
+			assert.Equal(t, test.wantRetryAfter, types.GetRetryAfterSeconds(apiErr))
+			assert.Equal(t, test.wantDisable, service.ShouldDisableChannel(apiErr))
+		})
+	}
+}
+
+func TestAdaptorDoRequestRotatesMarathonKeyBeforeSubmitIsAccepted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+
+	oldDB := model.DB
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	oldRetryTimes := common.RetryTimes
+	t.Cleanup(func() {
+		model.DB = oldDB
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+		common.RetryTimes = oldRetryTimes
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	common.RetryTimes = 2
+
+	var submitKeys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == submitPath {
+			submitKeys = append(submitKeys, r.Header.Get("Authorization"))
+			if r.Header.Get("Authorization") == "Bearer key-a" {
+				writeJSONResponse(t, w, http.StatusPaymentRequired, map[string]any{"detail": "insufficient credits for concurrent job reservation"})
+				return
+			}
+			writeJSONResponse(t, w, http.StatusAccepted, map[string]any{"id": "job_rotated", "status": "queued"})
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/delayed/jobs/job_rotated":
+			writeJSONResponse(t, w, http.StatusOK, map[string]any{"id": "job_rotated", "status": "succeeded"})
+		case "/v1/delayed/jobs/job_rotated/result":
+			writeJSONResponse(t, w, http.StatusOK, chatCompletionResult())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	autoBan := 1
+	channel := &model.Channel{
+		Id:      10821,
+		Type:    constant.ChannelTypeKiteDelayed,
+		Name:    "marathon",
+		Key:     "key-a\nkey-b\nkey-c",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+		BaseURL: &server.URL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:           true,
+			MultiKeySize:         3,
+			MultiKeyMode:         constant.MultiKeyModePolling,
+			MultiKeyPollingIndex: 1,
+		},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	common.SetContextKey(ctx, constant.ContextKeyChannelName, "marathon")
+	common.SetContextKey(ctx, constant.ContextKeyChannelKey, "key-a")
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	info := testRelayInfo(server.URL, false)
+	info.ChannelId = channel.Id
+	info.ChannelIsMultiKey = true
+	info.ChannelMultiKeyIndex = 0
+	info.ApiKey = "key-a"
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	response, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+	require.NoError(t, err)
+	require.IsType(t, &http.Response{}, response)
+	response.(*http.Response).Body.Close()
+	assert.Equal(t, []string{"Bearer key-a", "Bearer key-b"}, submitKeys)
+	assert.Equal(t, "key-b", info.ApiKey)
+	assert.Equal(t, 1, info.ChannelMultiKeyIndex)
+	assert.Equal(t, "key-b", common.GetContextKeyString(ctx, constant.ContextKeyChannelKey))
+	assert.Equal(t, 1, common.GetContextKeyInt(ctx, constant.ContextKeyChannelMultiKeyIndex))
+}
+
+func TestAdaptorDoRequestLimitsMarathonReservationRetries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+
+	oldDB := model.DB
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	oldRetryTimes := common.RetryTimes
+	t.Cleanup(func() {
+		model.DB = oldDB
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+		common.RetryTimes = oldRetryTimes
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	common.RetryTimes = 1
+
+	var submitKeys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == submitPath {
+			submitKeys = append(submitKeys, r.Header.Get("Authorization"))
+			writeJSONResponse(t, w, http.StatusPaymentRequired, map[string]any{"detail": "insufficient credits for concurrent job reservation"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	autoBan := 1
+	channel := &model.Channel{
+		Id:      10822,
+		Type:    constant.ChannelTypeKiteDelayed,
+		Name:    "marathon",
+		Key:     "key-a\nkey-b\nkey-c",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+		BaseURL: &server.URL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:           true,
+			MultiKeySize:         3,
+			MultiKeyMode:         constant.MultiKeyModePolling,
+			MultiKeyPollingIndex: 1,
+		},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	common.SetContextKey(ctx, constant.ContextKeyChannelName, "marathon")
+	common.SetContextKey(ctx, constant.ContextKeyChannelKey, "key-a")
+	info := testRelayInfo(server.URL, false)
+	info.ChannelId = channel.Id
+	info.ChannelIsMultiKey = true
+	info.ChannelMultiKeyIndex = 0
+	info.ApiKey = "key-a"
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	_, err = adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}`))
+	require.Error(t, err)
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, []string{"Bearer key-a", "Bearer key-b"}, submitKeys)
+	assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+	assert.Equal(t, reservationRetryAfterSeconds, types.GetRetryAfterSeconds(apiErr))
+	assert.True(t, types.IsSkipRetryError(apiErr))
 }
 
 func TestAdaptorDoRequestBuffersResultBeforePollContextCancel(t *testing.T) {
