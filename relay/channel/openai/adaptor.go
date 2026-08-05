@@ -80,9 +80,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	// assistant text when content is a string, and uses `reasoning` for prior
 	// thinking. Normalize only this provider/model combination so other
 	// OpenAI-compatible channels keep their original message shapes.
-	if info != nil && info.ChannelType == constant.ChannelTypeCustom &&
-		strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.tokenrouter.com") &&
-		strings.Contains(strings.ToLower(info.UpstreamModelName), "kimi") {
+	if isTokenRouterKimi(info) {
 		aiRequest.Messages = normalizeTokenRouterAssistantMessages(aiRequest.Messages)
 	}
 	//if common.DebugEnabled {
@@ -115,6 +113,40 @@ func removeEmptyAssistantMessages(messages []dto.Message) []dto.Message {
 		filtered = append(filtered, message)
 	}
 	return filtered
+}
+
+// isTokenRouterKimi reports whether the request targets TokenRouter's Kimi
+// compatibility endpoint, which needs provider-specific request fixups.
+func isTokenRouterKimi(info *relaycommon.RelayInfo) bool {
+	if info == nil || info.ChannelType != constant.ChannelTypeCustom {
+		return false
+	}
+	return strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.tokenrouter.com") &&
+		strings.Contains(strings.ToLower(info.UpstreamModelName), "kimi")
+}
+
+// TokenRouter's Kimi endpoint accepts only a three-level reasoning effort scale
+// and rejects every other value with HTTP 400, so the wider OpenAI scale has to
+// be folded onto the levels it understands.
+var tokenRouterReasoningEfforts = map[string]string{
+	"none":    "low",
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "high",
+	"high":    "high",
+	"xhigh":   "max",
+	"max":     "max",
+}
+
+// normalizeTokenRouterReasoningEffort maps a reasoning effort onto TokenRouter's
+// low/high/max scale. Unknown values are passed through untouched so upstream
+// keeps reporting them instead of being silently rewritten.
+func normalizeTokenRouterReasoningEffort(effort string) string {
+	normalized, ok := tokenRouterReasoningEfforts[strings.ToLower(strings.TrimSpace(effort))]
+	if !ok {
+		return effort
+	}
+	return normalized
 }
 
 func normalizeTokenRouterAssistantMessages(messages []dto.Message) []dto.Message {
@@ -397,6 +429,12 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 			request.THINKING = nil
 		}
 
+	}
+	// TokenRouter's Kimi endpoint rejects reasoning efforts outside low/high/max,
+	// so clamp the requested level instead of letting the upstream return 400.
+	if request.ReasoningEffort != "" && isTokenRouterKimi(info) {
+		request.ReasoningEffort = normalizeTokenRouterReasoningEffort(request.ReasoningEffort)
+		info.ReasoningEffort = request.ReasoningEffort
 	}
 	isOModel := dto.IsOpenAIReasoningOModel(info.UpstreamModelName)
 	isGPT5Model := dto.IsOpenAIGPT5Model(info.UpstreamModelName)

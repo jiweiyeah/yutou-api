@@ -143,3 +143,73 @@ func TestConvertClaudeRequestDoesNotMirrorReasoningForOtherCustomChannels(t *tes
 	require.NotNil(t, openAIRequest.Messages[0].ReasoningContent)
 	assert.Nil(t, openAIRequest.Messages[0].Reasoning)
 }
+
+func TestConvertOpenAIRequestClampsTokenRouterReasoningEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name     string
+		effort   string
+		expected string
+	}{
+		{name: "none folds to low", effort: "none", expected: "low"},
+		{name: "minimal folds to low", effort: "minimal", expected: "low"},
+		{name: "low is kept", effort: "low", expected: "low"},
+		{name: "medium folds to high", effort: "medium", expected: "high"},
+		{name: "high is kept", effort: "high", expected: "high"},
+		{name: "xhigh folds to max", effort: "xhigh", expected: "max"},
+		{name: "max is kept", effort: "max", expected: "max"},
+		{name: "casing is ignored", effort: "Medium", expected: "high"},
+		{name: "unknown value is passed through", effort: "turbo", expected: "turbo"},
+		{name: "empty value stays empty", effort: "", expected: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelType:       constant.ChannelTypeCustom,
+					ChannelBaseUrl:    "https://api.tokenrouter.com/v1/chat/completions",
+					UpstreamModelName: "moonshotai/kimi-k3-free",
+				},
+			}
+			request := &dto.GeneralOpenAIRequest{
+				Model:           "moonshotai/kimi-k3-free",
+				ReasoningEffort: tc.effort,
+				Messages:        []dto.Message{{Role: "user", Content: "hi"}},
+			}
+
+			converted, err := (&Adaptor{}).ConvertOpenAIRequest(c, info, request)
+
+			require.NoError(t, err)
+			openAIRequest, ok := converted.(*dto.GeneralOpenAIRequest)
+			require.True(t, ok)
+			assert.Equal(t, tc.expected, openAIRequest.ReasoningEffort)
+		})
+	}
+}
+
+func TestConvertOpenAIRequestKeepsReasoningEffortForOtherCustomChannels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeCustom,
+			ChannelBaseUrl:    "https://example.com/v1/chat/completions",
+			UpstreamModelName: "moonshotai/kimi-k3-free",
+		},
+	}
+	request := &dto.GeneralOpenAIRequest{
+		Model:           "moonshotai/kimi-k3-free",
+		ReasoningEffort: "medium",
+		Messages:        []dto.Message{{Role: "user", Content: "hi"}},
+	}
+
+	converted, err := (&Adaptor{}).ConvertOpenAIRequest(c, info, request)
+
+	require.NoError(t, err)
+	openAIRequest, ok := converted.(*dto.GeneralOpenAIRequest)
+	require.True(t, ok)
+	assert.Equal(t, "medium", openAIRequest.ReasoningEffort)
+}
