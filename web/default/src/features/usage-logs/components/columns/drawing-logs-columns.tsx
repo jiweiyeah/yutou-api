@@ -39,6 +39,9 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { StatusBadge } from '@/components/status-badge'
+// ===== CUSTOM START: 渠道列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
 import { formatTimestampToDate } from '@/lib/format'
 
 import { MJ_TASK_TYPES } from '../../constants'
@@ -85,6 +88,9 @@ export function useDrawingLogsColumns(
   isAdmin: boolean
 ): ColumnDef<MidjourneyLog>[] {
   const { t } = useTranslation()
+  // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  const isRoleAdmin = useIsAdmin()
+  // ===== CUSTOM END =====
   const columns: ColumnDef<MidjourneyLog>[] = [
     {
       accessorKey: 'submit_time',
@@ -111,11 +117,13 @@ export function useDrawingLogsColumns(
     },
   ]
 
-  if (isAdmin) {
+  // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  if (isRoleAdmin) {
     columns.push(
       createChannelColumn<MidjourneyLog>({ headerLabel: t('Channel') })
     )
   }
+  // ===== CUSTOM END =====
 
   columns.push({
     accessorKey: 'action',

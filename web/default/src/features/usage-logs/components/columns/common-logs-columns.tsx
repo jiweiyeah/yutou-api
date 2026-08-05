@@ -330,7 +330,8 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
     },
   ]
 
-  if (isAdmin) {
+  // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  if (isRoleAdmin) {
     columns.push(
       {
         id: 'channel',
@@ -488,7 +489,13 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
             </TooltipProvider>
           )
         },
-      },
+      }
+    )
+  }
+  // ===== CUSTOM END =====
+
+  if (isAdmin) {
+    columns.push(
       {
         id: 'user',
         header: t('User'),

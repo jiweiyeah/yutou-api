@@ -24,12 +24,12 @@ import { useTranslation } from 'react-i18next'
 
 import { StatusBadge } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+// ===== CUSTOM START: 详情列与渠道列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
-// ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
-import { useIsAdmin } from '@/hooks/use-admin'
-// ===== CUSTOM END =====
 
 import { TASK_ACTIONS, TASK_STATUS } from '../../constants'
 import { taskActionMapper, taskStatusMapper } from '../../lib/mappers'
@@ -125,8 +125,14 @@ export function useTaskLogsColumns(isAdmin: boolean): ColumnDef<TaskLog>[] {
     },
   ]
 
+  // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  if (isRoleAdmin) {
+    columns.push(createChannelColumn<TaskLog>({ headerLabel: t('Channel') }))
+  }
+  // ===== CUSTOM END =====
+
   if (isAdmin) {
-    columns.push(createChannelColumn<TaskLog>({ headerLabel: t('Channel') }), {
+    columns.push({
       id: 'user',
       header: t('User'),
       accessorFn: (row) => row.username || row.user_id,
