@@ -21,12 +21,19 @@ const (
 	kiteCreditsDefaultThreshold   = 0.10
 	kiteCreditsDefaultConcurrency = 16
 	kiteCreditsRequestTimeout     = 15 * time.Second
+	// kiteCreditsDefaultAuthFailMaxRatio caps the share of a channel's checked
+	// keys that may be auto-disabled for HTTP 401 in a single scan.
+	kiteCreditsDefaultAuthFailMaxRatio = 0.2
+	// kiteCreditsAuthFailGuardMinChecked exempts small pools from the 401
+	// guard: their blast radius is one easily re-enabled channel.
+	kiteCreditsAuthFailGuardMinChecked = 10
 )
 
 type KiteCreditsScanSummary struct {
 	Channels       int     `json:"channels"`
 	KeysChecked    int     `json:"keys_checked"`
 	LowBalanceKeys int     `json:"low_balance_keys"`
+	AuthFailedKeys int     `json:"auth_failed_keys"`
 	DisabledKeys   int     `json:"disabled_keys"`
 	RequestErrors  int     `json:"request_errors"`
 	SkippedKeys    int     `json:"skipped_keys"`
@@ -45,10 +52,11 @@ type kiteCreditJob struct {
 }
 
 type kiteCreditResult struct {
-	channel *model.Channel
-	key     string
-	balance float64
-	err     error
+	channel    *model.Channel
+	key        string
+	balance    float64
+	err        error
+	authFailed bool
 }
 
 type kiteCreditsRequestError struct {
@@ -58,7 +66,11 @@ type kiteCreditsRequestError struct {
 
 // RunKiteCreditsScan checks each enabled Kite Delayed key concurrently and
 // auto-disables keys whose remaining USD credit is at or below the configured
-// threshold. Transient HTTP/API errors are reported but never disable a key.
+// threshold, as well as keys the upstream rejects with HTTP 401 (dead keys).
+// Other transient HTTP/API errors are reported but never disable a key.
+// As a safety valve, 401-based disabling is skipped for a channel when the
+// failing share exceeds KITE_CREDITS_AUTH_FAIL_MAX_RATIO (default 0.2): that
+// pattern indicates an upstream auth outage rather than a batch of dead keys.
 func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) (KiteCreditsScanSummary, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -135,14 +147,26 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 	}()
 
 	processed := 0
-	lowBalanceByChannel := make(map[int]map[string]string)
+	authFailMaxRatio := kiteCreditsAuthFailMaxRatio()
+	checkedByChannel := make(map[int]int)
+	authFailedByChannel := make(map[int]map[string]string)
+	disableReasonsByChannel := make(map[int]map[string]string)
 	requestErrorsByChannel := make(map[int]kiteCreditsRequestError)
 	for result := range resultCh {
 		processed++
 		if report != nil {
 			report(processed, len(jobs))
 		}
+		checkedByChannel[result.channel.Id]++
 		if result.err != nil {
+			if result.authFailed {
+				summary.AuthFailedKeys++
+				if authFailedByChannel[result.channel.Id] == nil {
+					authFailedByChannel[result.channel.Id] = make(map[string]string)
+				}
+				authFailedByChannel[result.channel.Id][result.key] = fmt.Sprintf("Kite credits key unauthorized: %v", result.err)
+				continue
+			}
 			summary.RequestErrors++
 			entry := requestErrorsByChannel[result.channel.Id]
 			entry.count++
@@ -158,10 +182,34 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 
 		summary.LowBalanceKeys++
 		reason := fmt.Sprintf("Kite credits low: $%.6f <= configured threshold $%.6f", result.balance, threshold)
-		if lowBalanceByChannel[result.channel.Id] == nil {
-			lowBalanceByChannel[result.channel.Id] = make(map[string]string)
+		if disableReasonsByChannel[result.channel.Id] == nil {
+			disableReasonsByChannel[result.channel.Id] = make(map[string]string)
 		}
-		lowBalanceByChannel[result.channel.Id][result.key] = reason
+		disableReasonsByChannel[result.channel.Id][result.key] = reason
+	}
+
+	// 401-based disabling is skipped wholesale for a channel when too many of
+	// its keys fail auth at once — that is an upstream auth outage, not a batch
+	// of dead keys. Guard-tripped keys are reported as request errors instead.
+	for channelID, failedKeys := range authFailedByChannel {
+		checked := checkedByChannel[channelID]
+		if kiteAuthFailGuardTripped(len(failedKeys), checked, authFailMaxRatio) {
+			summary.RequestErrors += len(failedKeys)
+			entry := requestErrorsByChannel[channelID]
+			entry.count += len(failedKeys)
+			if entry.err == nil {
+				entry.err = fmt.Errorf("upstream returned HTTP %d", http.StatusUnauthorized)
+			}
+			requestErrorsByChannel[channelID] = entry
+			common.SysError(fmt.Sprintf("Kite credits auth-fail disable skipped for channel #%d: %d/%d checked keys returned HTTP 401, exceeding guard ratio %.2f", channelID, len(failedKeys), checked, authFailMaxRatio))
+			continue
+		}
+		if disableReasonsByChannel[channelID] == nil {
+			disableReasonsByChannel[channelID] = make(map[string]string)
+		}
+		for key, reason := range failedKeys {
+			disableReasonsByChannel[channelID][key] = reason
+		}
 	}
 
 	for channelID, requestError := range requestErrorsByChannel {
@@ -170,7 +218,7 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
-	for channelID, reasonsByKey := range lowBalanceByChannel {
+	for channelID, reasonsByKey := range disableReasonsByChannel {
 		disabled, err := model.AutoDisableChannelKeys(channelID, reasonsByKey)
 		if err != nil {
 			summary.DisableErrors += len(reasonsByKey)
@@ -223,6 +271,10 @@ func checkKiteCredits(ctx context.Context, job kiteCreditJob) kiteCreditResult {
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		result.err = fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+		// 401 means the upstream rejected the key itself — the key is dead.
+		// 403 is deliberately excluded: it may signal endpoint-level
+		// permissions rather than a revoked key.
+		result.authFailed = resp.StatusCode == http.StatusUnauthorized
 		return result
 	}
 
@@ -273,4 +325,26 @@ func kiteCreditsDisableThreshold() float64 {
 		return kiteCreditsDefaultThreshold
 	}
 	return threshold
+}
+
+func kiteCreditsAuthFailMaxRatio() float64 {
+	raw := strings.TrimSpace(common.GetEnvOrDefaultString("KITE_CREDITS_AUTH_FAIL_MAX_RATIO", "0.2"))
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 {
+		common.SysError(fmt.Sprintf("invalid KITE_CREDITS_AUTH_FAIL_MAX_RATIO=%q, using %.2f", raw, kiteCreditsDefaultAuthFailMaxRatio))
+		return kiteCreditsDefaultAuthFailMaxRatio
+	}
+	return ratio
+}
+
+// kiteAuthFailGuardTripped reports whether 401-based disabling should be
+// skipped for a channel: too many keys failing auth in one scan means the
+// upstream auth endpoint is broken, not that the keys are dead. Small pools
+// are exempt — their blast radius is a single easily re-enabled channel.
+// A maxRatio of 0 disables the guard (every 401 disables its key).
+func kiteAuthFailGuardTripped(authFailed, checked int, maxRatio float64) bool {
+	if authFailed == 0 || checked < kiteCreditsAuthFailGuardMinChecked || maxRatio <= 0 {
+		return false
+	}
+	return float64(authFailed) > float64(checked)*maxRatio
 }
