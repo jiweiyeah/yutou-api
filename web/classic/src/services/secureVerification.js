@@ -199,6 +199,20 @@ export const createApiCalls = {
   },
 
   /**
+   * 创建复制多密钥渠道中单条密钥的 API 调用
+   * @param {number} channelId - 渠道ID
+   * @param {number} keyIndex - 密钥索引
+   */
+  viewMultiKey: (channelId, keyIndex) => async () => {
+    const response = await API.post('/api/channel/multi_key/manage', {
+      channel_id: channelId,
+      action: 'get_key',
+      key_index: keyIndex,
+    });
+    return response.data;
+  },
+
+  /**
    * 创建自定义API调用
    * @param {string} url - API URL
    * @param {string} method - HTTP方法，默认为 'POST'

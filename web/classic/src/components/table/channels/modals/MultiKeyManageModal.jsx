@@ -41,12 +41,18 @@ import {
   IllustrationNoResult,
   IllustrationNoResultDark,
 } from '@douyinfe/semi-illustrations';
+import { IconCopy } from '@douyinfe/semi-icons';
 import {
   API,
+  copy,
+  isRoot,
   showError,
   showSuccess,
   timestamp2string,
 } from '../../../../helpers';
+import SecureVerificationModal from '../../../common/modals/SecureVerificationModal';
+import { useSecureVerification } from '../../../../hooks/common/useSecureVerification';
+import { createApiCalls } from '../../../../services/secureVerification';
 
 const { Text } = Typography;
 
@@ -55,6 +61,29 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
   const [loading, setLoading] = useState(false);
   const [keyStatusList, setKeyStatusList] = useState([]);
   const [operationLoading, setOperationLoading] = useState({});
+  const {
+    isModalVisible,
+    verificationMethods,
+    verificationState,
+    withVerification,
+    executeVerification,
+    cancelVerification,
+    setVerificationCode,
+    switchVerificationMethod,
+  } = useSecureVerification({
+    onSuccess: async (result) => {
+      if (result && result.success && result.data?.key) {
+        const ok = await copy(result.data.key);
+        if (ok) {
+          showSuccess(t('密钥已复制'));
+        } else {
+          showError(t('复制失败'));
+        }
+      } else if (result && result.success === false) {
+        showError(result.message || t('获取密钥失败'));
+      }
+    },
+  });
 
   // Pagination states
   const [currentPage, setCurrentPage] = useState(1);
@@ -114,6 +143,39 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       showError(t('获取密钥状态失败'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Copy a specific full key (requires secure verification)
+  const handleCopyKey = async (keyIndex) => {
+    if (!channel?.id) return;
+    const operationId = `copy_${keyIndex}`;
+    setOperationLoading((prev) => ({ ...prev, [operationId]: true }));
+
+    try {
+      const result = await withVerification(
+        createApiCalls.viewMultiKey(channel.id, keyIndex),
+        {
+          title: t('复制渠道密钥'),
+          description: t('为了保护账户安全，请验证您的身份后再复制完整密钥。'),
+          preferredMethod: 'passkey',
+        },
+      );
+
+      if (result && result.success && result.data?.key) {
+        const ok = await copy(result.data.key);
+        if (ok) {
+          showSuccess(t('密钥已复制'));
+        } else {
+          showError(t('复制失败'));
+        }
+      } else if (result && result.success === false) {
+        showError(result.message || t('获取密钥失败'));
+      }
+    } catch (error) {
+      showError(error.message || t('获取密钥失败'));
+    } finally {
+      setOperationLoading((prev) => ({ ...prev, [operationId]: false }));
     }
   };
 
@@ -362,15 +424,30 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
       dataIndex: 'index',
       render: (text) => `#${Number(text) + 1}`,
     },
-    // {
-    //   title: t('密钥预览'),
-    //   dataIndex: 'key_preview',
-    //   render: (text) => (
-    //     <Text code style={{ fontSize: '12px' }}>
-    //       {text}
-    //     </Text>
-    //   ),
-    // },
+    {
+      title: t('密钥预览'),
+      dataIndex: 'key_preview',
+      width: 220,
+      render: (preview, record) => (
+        <Space>
+          <Text code style={{ fontSize: '12px' }}>
+            {preview || '-'}
+          </Text>
+          {isRoot() && (
+            <Tooltip content={t('复制完整密钥')}>
+              <Button
+                theme='borderless'
+                type='tertiary'
+                size='small'
+                icon={<IconCopy />}
+                loading={operationLoading[`copy_${record.index}`]}
+                onClick={() => handleCopyKey(record.index)}
+              />
+            </Tooltip>
+          )}
+        </Space>
+      ),
+    },
     {
       title: t('状态'),
       dataIndex: 'status',
@@ -736,6 +813,18 @@ const MultiKeyManageModal = ({ visible, onCancel, channel, onRefresh }) => {
         </div>
       </div>
     </Modal>
+
+      <SecureVerificationModal
+        visible={isModalVisible}
+        verificationMethods={verificationMethods}
+        verificationState={verificationState}
+        onVerify={executeVerification}
+        onCancel={cancelVerification}
+        onCodeChange={setVerificationCode}
+        onMethodSwitch={switchVerificationMethod}
+        title={verificationState.title}
+        description={verificationState.description}
+      />
   );
 };
 

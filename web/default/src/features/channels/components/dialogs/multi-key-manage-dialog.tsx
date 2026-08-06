@@ -17,8 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import {
+  Copy,
+  Loader2,
+  Power,
+  PowerOff,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -37,6 +44,11 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import {
+  SecureVerificationDialog,
+  useSecureVerification,
+} from '@/features/auth/secure-verification'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
   hasPermission,
@@ -44,26 +56,27 @@ import {
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
-  getMultiKeyStatus,
-  enableMultiKey,
-  disableMultiKey,
-  deleteMultiKey,
-  enableAllMultiKeys,
-  disableAllMultiKeys,
   deleteDisabledMultiKeys,
+  deleteMultiKey,
+  disableAllMultiKeys,
+  disableMultiKey,
+  enableAllMultiKeys,
+  enableMultiKey,
+  getMultiKeyFullKey,
+  getMultiKeyStatus,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
   channelsQueryKeys,
   formatTimestamp,
-  getMultiKeyStatusConfig,
   getMultiKeyConfirmMessage,
+  getMultiKeyStatusConfig,
   isDestructiveAction,
 } from '../../lib'
 import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
 import { useChannels } from '../channels-provider'
-import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
+import { StatisticsCard } from './multi-key-statistics-card'
 
 type MultiKeyManageDialogProps = {
   open: boolean
@@ -83,6 +96,22 @@ export function MultiKeyManageDialog({
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const canViewSecret = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.SECRET_VIEW
+  )
+  const { copyToClipboard } = useCopyToClipboard({ notify: false })
+  const {
+    open: verificationOpen,
+    methods: verificationMethods,
+    state: verificationState,
+    executeVerification,
+    withVerification,
+    cancel: cancelVerification,
+    setCode: setVerificationCode,
+    switchMethod: switchVerificationMethod,
+  } = useSecureVerification()
 
   // Data state
   const [isLoading, setIsLoading] = useState(false)
@@ -100,6 +129,7 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [copyingKeyIndex, setCopyingKeyIndex] = useState<number | null>(null)
 
   // Reset and load data when dialog opens
   useEffect(() => {
@@ -159,6 +189,51 @@ export function MultiKeyManageDialog({
     setCurrentPage(newPage)
     loadKeyStatus(newPage, pageSize)
   }
+
+  const handleCopyFullKey = useCallback(
+    async (keyIndex: number) => {
+      if (!currentRow || !canViewSecret) return
+
+      setCopyingKeyIndex(keyIndex)
+      try {
+        const result = await withVerification(
+          async () => {
+            const response = await getMultiKeyFullKey(currentRow.id, keyIndex)
+            if (!response.success || !response.data?.key) {
+              throw new Error(
+                response.message || t('Failed to fetch channel key')
+              )
+            }
+
+            const ok = await copyToClipboard(response.data.key)
+            if (!ok) {
+              throw new Error(t('Copy failed'))
+            }
+
+            toast.success(t('Key copied'))
+            return response
+          },
+          {
+            preferredMethod: 'passkey',
+            title: t('Verify to copy channel key'),
+            description: t(
+              'Use Passkey or 2FA to confirm your identity before copying this channel key.'
+            ),
+          }
+        )
+
+        // Verification dialog was opened; copy will retry after success.
+        if (result === null) return
+      } catch (error: unknown) {
+        toast.error(
+          error instanceof Error ? error.message : t('Failed to copy key')
+        )
+      } finally {
+        setCopyingKeyIndex(null)
+      }
+    },
+    [canViewSecret, copyToClipboard, currentRow, t, withVerification]
+  )
 
   const performAction = async () => {
     if (!confirmAction || !currentRow) return
@@ -401,6 +476,34 @@ export function MultiKeyManageDialog({
                     cell: (key) => `#${key.index + 1}`,
                   },
                   {
+                    id: 'key-preview',
+                    header: t('Key Preview'),
+                    className: 'min-w-[180px]',
+                    cell: (key) => (
+                      <div className='flex items-center gap-1.5'>
+                        <code className='bg-muted rounded px-1.5 py-0.5 font-mono text-xs'>
+                          {key.key_preview || '-'}
+                        </code>
+                        {canViewSecret && (
+                          <Button
+                            variant='ghost'
+                            size='icon-sm'
+                            className='h-7 w-7 shrink-0'
+                            disabled={copyingKeyIndex === key.index}
+                            title={t('Copy full key')}
+                            onClick={() => handleCopyFullKey(key.index)}
+                          >
+                            {copyingKeyIndex === key.index ? (
+                              <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                            ) : (
+                              <Copy className='h-3.5 w-3.5' />
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    ),
+                  },
+                  {
                     id: 'status',
                     header: t('Status'),
                     className: 'w-32',
@@ -479,6 +582,23 @@ export function MultiKeyManageDialog({
         destructive={isDestructiveAction(confirmAction)}
         isLoading={isPerformingAction}
         handleConfirm={performAction}
+      />
+
+      <SecureVerificationDialog
+        open={verificationOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            cancelVerification()
+          }
+        }}
+        methods={verificationMethods}
+        state={verificationState}
+        onVerify={async (method, code) => {
+          await executeVerification(method, code)
+        }}
+        onCancel={cancelVerification}
+        onCodeChange={setVerificationCode}
+        onMethodChange={switchVerificationMethod}
       />
     </>
   )

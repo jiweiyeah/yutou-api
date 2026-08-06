@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 
+	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -1430,8 +1431,8 @@ func CopyChannel(c *gin.Context) {
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
 	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status", "get_key"
+	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, delete_key, and get_key actions
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
 	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
@@ -1488,11 +1489,23 @@ func ManageMultiKeys(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
 		return
 	}
+	if request.Action == "get_key" {
+		if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView) {
+			common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
+			return
+		}
+		if !requireActiveSecureVerification(c) {
+			return
+		}
+	}
 
-	// get_key_status 为只读查询，不记录审计；其余为修改操作，记录审计并跳过中间件兜底。
-	if request.Action == "get_key_status" {
+	// get_key_status 为只读查询，不记录审计；get_key 单独记录密钥查看审计；其余为修改操作。
+	switch request.Action {
+	case "get_key_status":
 		markAuditLogged(c)
-	} else {
+	case "get_key":
+		// audited inside the action branch with key index
+	default:
 		recordManageAudit(c, "channel.multi_key_manage", map[string]interface{}{
 			"action": request.Action,
 			"id":     channel.Id,
@@ -1504,6 +1517,38 @@ func ManageMultiKeys(c *gin.Context) {
 	defer lock.Unlock()
 
 	switch request.Action {
+	case "get_key":
+		if request.KeyIndex == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "未指定要查看的密钥索引",
+			})
+			return
+		}
+		keys := channel.GetKeys()
+		keyIndex := *request.KeyIndex
+		if keyIndex < 0 || keyIndex >= len(keys) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "密钥索引无效",
+			})
+			return
+		}
+		recordManageAudit(c, "channel.multi_key_view", map[string]interface{}{
+			"id":        channel.Id,
+			"name":      channel.Name,
+			"key_index": keyIndex,
+		})
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "获取成功",
+			"data": gin.H{
+				"index": keyIndex,
+				"key":   keys[keyIndex],
+			},
+		})
+		return
+
 	case "get_key_status":
 		keys := channel.GetKeys()
 
@@ -1934,6 +1979,57 @@ func ManageMultiKeys(c *gin.Context) {
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
 	return action == "delete_key" || action == "delete_disabled_keys"
+}
+
+// requireActiveSecureVerification checks the step-up verification session used by
+// secret-viewing endpoints. Returns false and writes a 403 response when missing/expired.
+func requireActiveSecureVerification(c *gin.Context) bool {
+	userId := c.GetInt("id")
+	if userId == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "未登录",
+		})
+		return false
+	}
+
+	session := sessions.Default(c)
+	verifiedAtRaw := session.Get(SecureVerificationSessionKey)
+	if verifiedAtRaw == nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "需要安全验证",
+			"code":    "VERIFICATION_REQUIRED",
+		})
+		return false
+	}
+
+	verifiedAt, ok := verifiedAtRaw.(int64)
+	if !ok {
+		session.Delete(SecureVerificationSessionKey)
+		session.Delete(secureVerificationMethodSessionKey)
+		_ = session.Save()
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "验证状态异常，请重新验证",
+			"code":    "VERIFICATION_INVALID",
+		})
+		return false
+	}
+
+	if time.Now().Unix()-verifiedAt >= SecureVerificationTimeout {
+		session.Delete(SecureVerificationSessionKey)
+		session.Delete(secureVerificationMethodSessionKey)
+		_ = session.Save()
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "验证已过期，请重新验证",
+			"code":    "VERIFICATION_EXPIRED",
+		})
+		return false
+	}
+
+	return true
 }
 
 // OllamaPullModel 拉取 Ollama 模型

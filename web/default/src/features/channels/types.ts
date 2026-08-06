@@ -298,10 +298,20 @@ export interface CopyChannelParams {
   reset_balance?: boolean
 }
 
+export interface MultiKeyKeyResponse {
+  success: boolean
+  message?: string
+  data?: {
+    index: number
+    key: string
+  }
+}
+
 export interface MultiKeyManageParams {
   channel_id: number
   action:
     | 'get_key_status'
+    | 'get_key'
     | 'disable_key'
     | 'enable_key'
     | 'enable_all_keys'

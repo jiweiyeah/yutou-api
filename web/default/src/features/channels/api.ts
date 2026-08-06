@@ -33,6 +33,7 @@ import type {
   GetChannelResponse,
   GetChannelsParams,
   GetChannelsResponse,
+  MultiKeyKeyResponse,
   MultiKeyManageParams,
   MultiKeyStatusResponse,
   SearchChannelsParams,
@@ -386,6 +387,21 @@ export async function getMultiKeyStatus(
     page_size: pageSize,
     status,
   }) as Promise<MultiKeyStatusResponse>
+}
+
+/**
+ * Get full plaintext key for a multi-key channel entry.
+ * Requires ChannelSecretView permission and active secure verification.
+ */
+export async function getMultiKeyFullKey(
+  channelId: number,
+  keyIndex: number
+): Promise<MultiKeyKeyResponse> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'get_key',
+    key_index: keyIndex,
+  }) as Promise<MultiKeyKeyResponse>
 }
 
 /**
