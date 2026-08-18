@@ -65,6 +65,8 @@ type ChannelInfo struct {
 	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
 	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+	MultiKeyDisabledUntil  map[int]int64         `json:"multi_key_disabled_until,omitempty"`  // 临时自动禁用截止时间，key index -> time
+	AutoDisabledUntil      int64                 `json:"auto_disabled_until,omitempty"`       // 单Key临时自动禁用截止时间
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
 }
@@ -561,6 +563,13 @@ func (channel *Channel) Update() error {
 				}
 			}
 		}
+		if channel.ChannelInfo.MultiKeyDisabledUntil != nil {
+			for idx := range channel.ChannelInfo.MultiKeyDisabledUntil {
+				if idx >= channel.ChannelInfo.MultiKeySize {
+					delete(channel.ChannelInfo.MultiKeyDisabledUntil, idx)
+				}
+			}
+		}
 	}
 	var err error
 	err = DB.Model(channel).Updates(channel).Error
@@ -667,8 +676,12 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 		}
 		if status == common.ChannelStatusEnabled {
 			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+			delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
+			delete(channel.ChannelInfo.MultiKeyDisabledTime, keyIndex)
+			delete(channel.ChannelInfo.MultiKeyDisabledUntil, keyIndex)
 		} else {
 			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = status
+			delete(channel.ChannelInfo.MultiKeyDisabledUntil, keyIndex)
 			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
 				channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
 			}
@@ -770,6 +783,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 			info["status_time"] = common.GetTimestamp()
 			channel.SetOtherInfo(info)
 			channel.Status = status
+			channel.ChannelInfo.AutoDisabledUntil = 0
 			shouldUpdateAbilities = true
 		}
 		err = channel.SaveWithoutKey()
@@ -779,6 +793,217 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		}
 	}
 	return true
+}
+
+// DisableChannelKeyUntil auto-disables the selected key and optionally stores
+// the time at which a temporary upstream restriction is expected to expire.
+// The row lock keeps concurrent requests from overwriting key state or reset
+// metadata with stale channel snapshots.
+func DisableChannelKeyUntil(channelId int, usingKey string, reason string, until int64) (bool, error) {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	var (
+		channel        Channel
+		previousStatus int
+		changed        bool
+	)
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status == common.ChannelStatusManuallyDisabled || !channel.GetAutoBan() {
+			return nil
+		}
+
+		previousStatus = channel.Status
+		now := common.GetTimestamp()
+		keys := channel.GetKeys()
+		if !channel.ChannelInfo.IsMultiKey {
+			if usingKey != "" && strings.TrimSpace(channel.Key) != strings.TrimSpace(usingKey) {
+				return nil
+			}
+			info := channel.GetOtherInfo()
+			currentUntil := channel.ChannelInfo.AutoDisabledUntil
+			currentReason, _ := info["status_reason"].(string)
+			if channel.Status == common.ChannelStatusAutoDisabled && currentUntil == until && currentReason == reason {
+				return nil
+			}
+			channel.Status = common.ChannelStatusAutoDisabled
+			channel.ChannelInfo.AutoDisabledUntil = until
+			info["status_reason"] = reason
+			info["status_time"] = now
+			channel.SetOtherInfo(info)
+			changed = true
+		} else {
+			keyIndex := -1
+			usingKey = strings.TrimSpace(usingKey)
+			for index, key := range keys {
+				if strings.TrimSpace(key) == usingKey {
+					keyIndex = index
+					break
+				}
+			}
+			if keyIndex < 0 {
+				return fmt.Errorf("channel %d key not found", channelId)
+			}
+			if channel.ChannelInfo.MultiKeyStatusList != nil {
+				if status, exists := channel.ChannelInfo.MultiKeyStatusList[keyIndex]; exists && status == common.ChannelStatusManuallyDisabled {
+					return nil
+				}
+			}
+			if channel.ChannelInfo.MultiKeyStatusList == nil {
+				channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
+				channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+			}
+			if channel.ChannelInfo.MultiKeyDisabledTime == nil {
+				channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+			}
+			if until > 0 && channel.ChannelInfo.MultiKeyDisabledUntil == nil {
+				channel.ChannelInfo.MultiKeyDisabledUntil = make(map[int]int64)
+			}
+
+			currentStatus := channel.ChannelInfo.MultiKeyStatusList[keyIndex]
+			currentReason := channel.ChannelInfo.MultiKeyDisabledReason[keyIndex]
+			currentUntil := channel.ChannelInfo.MultiKeyDisabledUntil[keyIndex]
+			if currentStatus == common.ChannelStatusAutoDisabled && currentReason == reason && currentUntil == until {
+				return nil
+			}
+			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = common.ChannelStatusAutoDisabled
+			channel.ChannelInfo.MultiKeyDisabledReason[keyIndex] = reason
+			channel.ChannelInfo.MultiKeyDisabledTime[keyIndex] = now
+			if until > 0 {
+				channel.ChannelInfo.MultiKeyDisabledUntil[keyIndex] = until
+			} else {
+				delete(channel.ChannelInfo.MultiKeyDisabledUntil, keyIndex)
+			}
+			if !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+				channel.Status = common.ChannelStatusAutoDisabled
+				info := channel.GetOtherInfo()
+				info["status_reason"] = "All keys are disabled"
+				info["status_time"] = now
+				channel.SetOtherInfo(info)
+			}
+			changed = true
+		}
+
+		if !changed {
+			return nil
+		}
+		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+			"channel_info": channel.ChannelInfo,
+			"other_info":   channel.OtherInfo,
+			"status":       channel.Status,
+		}).Error
+	})
+	if err != nil || !changed {
+		return changed, err
+	}
+
+	if previousStatus != channel.Status {
+		if err := UpdateAbilityStatus(channel.Id, channel.Status == common.ChannelStatusEnabled); err != nil {
+			return changed, err
+		}
+		CacheUpdateChannelStatus(channel.Id, channel.Status)
+	}
+	channel.Keys = channel.GetKeys()
+	CacheUpdateChannel(&channel)
+	return changed, nil
+}
+
+// RecoverExpiredChannelKeys re-enables only temporary auto-disabled keys whose
+// reset time has passed. Manual disables and permanent auto-disables are left
+// untouched.
+func RecoverExpiredChannelKeys(channelId int, now int64) (int, error) {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	var (
+		channel        Channel
+		previousStatus int
+		recovered      int
+	)
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status == common.ChannelStatusManuallyDisabled {
+			return nil
+		}
+
+		previousStatus = channel.Status
+		keys := channel.GetKeys()
+		if !channel.ChannelInfo.IsMultiKey {
+			if channel.Status != common.ChannelStatusAutoDisabled || channel.ChannelInfo.AutoDisabledUntil <= 0 || channel.ChannelInfo.AutoDisabledUntil > now {
+				return nil
+			}
+			channel.Status = common.ChannelStatusEnabled
+			channel.ChannelInfo.AutoDisabledUntil = 0
+			info := channel.GetOtherInfo()
+			delete(info, "status_reason")
+			delete(info, "status_time")
+			channel.SetOtherInfo(info)
+			recovered = 1
+		} else {
+			if channel.ChannelInfo.MultiKeyDisabledUntil == nil || channel.ChannelInfo.MultiKeyStatusList == nil {
+				return nil
+			}
+			for keyIndex, until := range channel.ChannelInfo.MultiKeyDisabledUntil {
+				if until <= 0 || until > now || channel.ChannelInfo.MultiKeyStatusList[keyIndex] != common.ChannelStatusAutoDisabled {
+					continue
+				}
+				delete(channel.ChannelInfo.MultiKeyDisabledUntil, keyIndex)
+				delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+				delete(channel.ChannelInfo.MultiKeyDisabledReason, keyIndex)
+				delete(channel.ChannelInfo.MultiKeyDisabledTime, keyIndex)
+				recovered++
+			}
+			if recovered > 0 && channel.Status == common.ChannelStatusAutoDisabled && hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+				info := channel.GetOtherInfo()
+				statusReason, _ := info["status_reason"].(string)
+				if statusReason == "" || statusReason == "All keys are disabled" {
+					channel.Status = common.ChannelStatusEnabled
+					delete(info, "status_reason")
+					delete(info, "status_time")
+					channel.SetOtherInfo(info)
+				}
+			}
+		}
+
+		if recovered == 0 {
+			return nil
+		}
+		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+			"channel_info": channel.ChannelInfo,
+			"other_info":   channel.OtherInfo,
+			"status":       channel.Status,
+		}).Error
+	})
+	if err != nil || recovered == 0 {
+		return recovered, err
+	}
+
+	if previousStatus != channel.Status {
+		if err := UpdateAbilityStatus(channel.Id, channel.Status == common.ChannelStatusEnabled); err != nil {
+			return recovered, err
+		}
+		if channel.Status == common.ChannelStatusEnabled {
+			InitChannelCache()
+			return recovered, nil
+		}
+		CacheUpdateChannelStatus(channel.Id, channel.Status)
+	}
+	channel.Keys = channel.GetKeys()
+	CacheUpdateChannel(&channel)
+	return recovered, nil
 }
 
 // AutoDisableChannelKeys disables several exhausted keys with one database
@@ -817,6 +1042,7 @@ func AutoDisableChannelKeys(channelId int, reasonsByKey map[string]string) (int,
 				return nil
 			}
 			channel.Status = common.ChannelStatusAutoDisabled
+			channel.ChannelInfo.AutoDisabledUntil = 0
 			info := channel.GetOtherInfo()
 			info["status_reason"] = reason
 			info["status_time"] = common.GetTimestamp()
@@ -845,6 +1071,7 @@ func AutoDisableChannelKeys(channelId int, reasonsByKey map[string]string) (int,
 				channel.ChannelInfo.MultiKeyStatusList[index] = common.ChannelStatusAutoDisabled
 				channel.ChannelInfo.MultiKeyDisabledReason[index] = reason
 				channel.ChannelInfo.MultiKeyDisabledTime[index] = now
+				delete(channel.ChannelInfo.MultiKeyDisabledUntil, index)
 				disabledCount++
 			}
 			if disabledCount > 0 && !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
@@ -1213,6 +1440,14 @@ func GetEnabledChannelsWithKeysByType(channelType int) ([]*Channel, error) {
 	var channels []*Channel
 	err := DB.Where("type = ? AND status = ?", channelType, common.ChannelStatusEnabled).
 		Order("id asc").Find(&channels).Error
+	return channels, err
+}
+
+// GetChannelsByTypeWithKeys returns full channel rows for maintenance jobs
+// that need to inspect per-key state, including disabled channels.
+func GetChannelsByTypeWithKeys(channelType int) ([]*Channel, error) {
+	var channels []*Channel
+	err := DB.Where("type = ?", channelType).Order("id asc").Find(&channels).Error
 	return channels, err
 }
 

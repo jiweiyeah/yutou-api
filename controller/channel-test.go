@@ -1021,12 +1021,30 @@ func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*m
 		if channel.Status == common.ChannelStatusManuallyDisabled {
 			continue
 		}
+		if channel.Status == common.ChannelStatusAutoDisabled && hasUnexpiredTemporaryDisable(channel, time.Now().Unix()) {
+			continue
+		}
 		if mode == operation_setting.ChannelTestModePassiveRecovery && channel.Status != common.ChannelStatusAutoDisabled {
 			continue
 		}
 		selected = append(selected, channel)
 	}
 	return selected
+}
+
+func hasUnexpiredTemporaryDisable(channel *model.Channel, now int64) bool {
+	if channel == nil {
+		return false
+	}
+	if channel.ChannelInfo.AutoDisabledUntil > now {
+		return true
+	}
+	for _, until := range channel.ChannelInfo.MultiKeyDisabledUntil {
+		if until > now {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAllChannels enqueues a channel_test system task instead of running the

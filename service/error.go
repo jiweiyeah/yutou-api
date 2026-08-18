@@ -112,16 +112,15 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 		return
 	}
 
-	if common.GetJsonType(errResponse.Error) == "object" {
-		// General format error (OpenAI, Anthropic, Gemini, etc.)
-		oaiError := errResponse.TryToOpenAIError()
-		if oaiError != nil {
-			newApiErr = types.WithOpenAIError(*oaiError, resp.StatusCode)
-			if showBodyWhenFail {
-				newApiErr.Err = buildErrWithBody(newApiErr.Error())
-			}
-			return
+	// General format error (OpenAI, Anthropic, Gemini, etc.). Some providers
+	// return message/type/code at the top level instead of nesting them under
+	// an "error" object.
+	if oaiError := errResponse.TryToOpenAIError(); oaiError != nil {
+		newApiErr = types.WithOpenAIError(*oaiError, resp.StatusCode)
+		if showBodyWhenFail {
+			newApiErr.Err = buildErrWithBody(newApiErr.Error())
 		}
+		return
 	}
 	newApiErr = types.NewOpenAIError(errors.New(errResponse.ToMessage()), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 	if showBodyWhenFail {

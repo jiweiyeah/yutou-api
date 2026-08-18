@@ -122,6 +122,20 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
+func TestRelayErrorHandlerKeepsTopLevelOpenAIErrorCode(t *testing.T) {
+	body := `{"message":"free allowance exhausted","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}`
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.NotNil(t, newAPIError)
+	require.Equal(t, DeepSeekFreeTierLimitCode, newAPIError.GetErrorCode())
+	require.Equal(t, "free allowance exhausted", newAPIError.Error())
+}
+
 func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
 	withDebugEnabled(t, true)
 

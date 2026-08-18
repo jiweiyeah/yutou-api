@@ -23,6 +23,36 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(kiteCreditsHandler{})
+	service.RegisterSystemTaskHandler(deepSeekFreeTierRecoveryHandler{})
+}
+
+type deepSeekFreeTierRecoveryHandler struct{}
+
+func (deepSeekFreeTierRecoveryHandler) Type() string {
+	return model.SystemTaskTypeDeepSeekFreeTierRecovery
+}
+
+func (deepSeekFreeTierRecoveryHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("DEEPSEEK_FREE_TIER_RECOVERY_TASK_ENABLED", true)
+}
+
+func (deepSeekFreeTierRecoveryHandler) Interval() time.Duration {
+	minutes := common.GetEnvOrDefault("DEEPSEEK_FREE_TIER_RECOVERY_INTERVAL_MINUTES", 5)
+	if minutes < 1 {
+		minutes = 5
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (deepSeekFreeTierRecoveryHandler) NewPayload() any { return nil }
+
+func (deepSeekFreeTierRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunDeepSeekFreeTierRecovery(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // kiteCreditsHandler periodically checks Kite Delayed credits and disables

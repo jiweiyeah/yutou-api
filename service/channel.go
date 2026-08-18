@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -17,6 +18,10 @@ func formatNotifyType(channelId int, status int) string {
 
 // disable & notify
 func DisableChannel(channelError types.ChannelError, reason string) {
+	DisableChannelUntil(channelError, reason, 0)
+}
+
+func DisableChannelUntil(channelError types.ChannelError, reason string, until int64) {
 	common.SysLog(fmt.Sprintf("通道「%s」（#%d）发生错误，准备禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, common.LocalLogPreview(reason)))
 
 	// 检查是否启用自动禁用功能
@@ -25,10 +30,22 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 		return
 	}
 
-	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason)
+	var success bool
+	if until > 0 {
+		changed, err := model.DisableChannelKeyUntil(channelError.ChannelId, channelError.UsingKey, reason, until)
+		if err != nil {
+			common.SysError(fmt.Sprintf("failed to temporarily disable channel #%d: %v", channelError.ChannelId, err))
+		}
+		success = changed
+	} else {
+		success = model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason)
+	}
 	if success {
 		subject := fmt.Sprintf("通道「%s」（#%d）已被禁用", channelError.ChannelName, channelError.ChannelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
+		if until > 0 {
+			content = fmt.Sprintf("%s，预计恢复时间：%s", content, time.Unix(until, 0).Format(time.RFC3339))
+		}
 		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, content)
 	}
 }

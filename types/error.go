@@ -88,16 +88,17 @@ const (
 )
 
 type NewAPIError struct {
-	Err                error
-	RelayError         any
-	skipRetry          bool
-	autoDisableChannel bool
-	retryAfterSeconds  int
-	recordErrorLog     *bool
-	errorType          ErrorType
-	errorCode          ErrorCode
-	StatusCode         int
-	Metadata           json.RawMessage
+	Err                 error
+	RelayError          any
+	skipRetry           bool
+	autoDisableChannel  bool
+	channelDisableUntil int64
+	retryAfterSeconds   int
+	recordErrorLog      *bool
+	errorType           ErrorType
+	errorCode           ErrorCode
+	StatusCode          int
+	Metadata            json.RawMessage
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.
@@ -388,6 +389,13 @@ func IsChannelAutoDisableError(err *NewAPIError) bool {
 	return err.autoDisableChannel
 }
 
+func GetChannelAutoDisableUntil(err *NewAPIError) int64 {
+	if err == nil {
+		return 0
+	}
+	return err.channelDisableUntil
+}
+
 func GetRetryAfterSeconds(err *NewAPIError) int {
 	if err == nil {
 		return 0
@@ -405,6 +413,15 @@ func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 func ErrOptionWithChannelAutoDisable() NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.autoDisableChannel = true
+	}
+}
+
+func ErrOptionWithChannelAutoDisableUntil(until int64) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.autoDisableChannel = true
+		if until > 0 {
+			e.channelDisableUntil = until
+		}
 	}
 }
 
