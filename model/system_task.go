@@ -23,6 +23,9 @@ const (
 	SystemTaskTypeAsyncTaskPoll            = "async_task_poll"
 	SystemTaskTypeKiteCredits              = "kite_credits"
 	SystemTaskTypeDeepSeekFreeTierRecovery = "deepseek_free_tier_recovery"
+	// ===== CUSTOM START: keelcode token 自动续期 =====
+	SystemTaskTypeKeelcodeTokenRefresh = "keelcode_token_refresh"
+	// ===== CUSTOM END =====
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

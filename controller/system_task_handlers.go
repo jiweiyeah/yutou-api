@@ -24,7 +24,48 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(kiteCreditsHandler{})
 	service.RegisterSystemTaskHandler(deepSeekFreeTierRecoveryHandler{})
+	// ===== CUSTOM START: keelcode token 自动续期 =====
+	service.RegisterSystemTaskHandler(keelcodeTokenRefreshHandler{})
+	// ===== CUSTOM END =====
 }
+
+// ===== CUSTOM START: keelcode token 自动续期 =====
+
+// keelcodeTokenRefreshHandler periodically renews keelcode access tokens that
+// are about to expire. keelcode tokens live ~7 days and an unexpired token can
+// mint its successor over plain HTTP, so the job refreshes any key whose ledger
+// entry expires within the lead window (default 48h) and swaps it into the
+// channel key list in place.
+type keelcodeTokenRefreshHandler struct{}
+
+func (keelcodeTokenRefreshHandler) Type() string {
+	return model.SystemTaskTypeKeelcodeTokenRefresh
+}
+
+func (keelcodeTokenRefreshHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("KEELCODE_TOKEN_REFRESH_TASK_ENABLED", true)
+}
+
+func (keelcodeTokenRefreshHandler) Interval() time.Duration {
+	minutes := common.GetEnvOrDefault("KEELCODE_TOKEN_REFRESH_INTERVAL_MINUTES", 360)
+	if minutes < 1 {
+		minutes = 360
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (keelcodeTokenRefreshHandler) NewPayload() any { return nil }
+
+func (keelcodeTokenRefreshHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunKeelcodeTokenRefresh(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// ===== CUSTOM END =====
 
 type deepSeekFreeTierRecoveryHandler struct{}
 

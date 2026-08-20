@@ -299,6 +299,9 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
+		// ===== CUSTOM START: keelcode token 续期台账 =====
+		&KeelcodeToken{},
+		// ===== CUSTOM END =====
 	)
 	if err != nil {
 		return err
@@ -351,6 +354,9 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		// ===== CUSTOM START: keelcode token 续期台账 =====
+		{&KeelcodeToken{}, "KeelcodeToken"},
+		// ===== CUSTOM END =====
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
