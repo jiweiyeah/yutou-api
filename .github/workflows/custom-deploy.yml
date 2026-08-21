@@ -9,8 +9,10 @@ name: Custom — Build & deploy to server
 #   DEPLOY_USER     — SSH user (e.g. root)
 #   DEPLOY_PATH     — directory on the server containing docker-compose.yml
 #                     (e.g. /opt/new-api)
-# Optional:
-#   DEPLOY_PORT     — SSH port (defaults to 22)
+# ===== CUSTOM START: SSH port after harden =====
+#   DEPLOY_PORT     — SSH port (required after 2026-08-21 harden; server is 58317, not 22)
+#                     Workflow still defaults to 22 if this secret is missing.
+# ===== CUSTOM END =====
 
 on:
   workflow_dispatch:

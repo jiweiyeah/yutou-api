@@ -201,6 +201,13 @@ git remote -v          # must show origin (fork) AND upstream (QuantumNous)
 git branch --show-current   # custom for dev work; main only for sync
 ```
 
+# ===== CUSTOM START: production SSH =====
+#### Production SSH (custom)
+
+How to log in, and how to enroll a new laptop key: `docs/custom/ssh.md`.
+Host `154.202.119.148`, port **58317**, key-only. Never commit private keys.
+# ===== CUSTOM END =====
+
 ### Rule 9: Pull Requests — Identify AI-Generated Contributions When Appropriate
 
 When creating a pull request:
