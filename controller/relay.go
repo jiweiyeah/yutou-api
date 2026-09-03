@@ -20,6 +20,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	relayproxy "github.com/QuantumNous/new-api/relay/proxy"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -226,11 +227,22 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			// ===== CUSTOM START: 记录成功响应用于动态代理切换 =====
+			relayproxy.RecordResponseForProxy(relayInfo, 200, true)
+			// ===== CUSTOM END =====
 			return
 		}
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
+
+		// ===== CUSTOM START: 记录失败响应用于动态代理切换 =====
+		statusCode := newAPIError.StatusCode
+		if statusCode == 0 {
+			statusCode = 500
+		}
+		relayproxy.RecordResponseForProxy(relayInfo, statusCode, false)
+		// ===== CUSTOM END =====
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 

@@ -195,6 +195,10 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/channel_cache_stats", controller.GetChannelCacheStats)
 			optionRoute.POST("/channel_cache_stats/reset", controller.ResetChannelCacheStats)
 			// ===== CUSTOM END =====
+			// ===== CUSTOM START: 动态代理统计 =====
+			optionRoute.GET("/proxy_stats/:id", controller.GetProxyStats)
+			optionRoute.POST("/proxy_stats/:id/reset", controller.ResetProxyState)
+			// ===== CUSTOM END =====
 			optionRoute.POST("/rest_model_ratio", controller.ResetModelRatio)
 			optionRoute.POST("/migrate_console_setting", controller.MigrateConsoleSetting) // 用于迁移检测的旧键，下个版本会删除
 			optionRoute.GET("/waffo-pancake/catalog", controller.ListWaffoPancakeCatalog)

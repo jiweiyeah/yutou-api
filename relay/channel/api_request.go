@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	relayproxy "github.com/QuantumNous/new-api/relay/proxy"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -477,14 +478,20 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	var client *http.Client
 	var err error
+
+	// ===== CUSTOM START: 动态代理切换支持 =====
+	// 优先级: 渠道设置的 Proxy > 动态代理管理器 > 默认客户端
 	if info.ChannelSetting.Proxy != "" {
 		client, err = service.NewProxyHttpClient(info.ChannelSetting.Proxy)
 		if err != nil {
 			return nil, fmt.Errorf("new proxy http client failed: %w", err)
 		}
 	} else {
-		client = service.GetHttpClient()
+		// 使用动态代理管理器（支持 429 降级切换）
+		baseClient := service.GetHttpClient()
+		client = relayproxy.WrapHTTPClientWithProxy(c, info, baseClient)
 	}
+	// ===== CUSTOM END =====
 
 	var stopPinger context.CancelFunc
 	var pingerDone <-chan struct{}

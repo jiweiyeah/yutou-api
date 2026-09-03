@@ -1,0 +1,173 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "http-in",
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy-1",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "104.17.219.106",
+          "port": 2053,
+          "users": [{
+            "id": "51a0af77-a60c-4d9b-81a4-f50e1b38d90b",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "yes.mytunnel.kdns.fr",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/"
+        }
+      }
+    },
+    {
+      "tag": "proxy-2",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "188.164.248.24",
+          "port": 2083,
+          "users": [{
+            "id": "51a0af77-a60c-4d9b-81a4-f50e1b38d90b",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "yes.mytunnel.kdns.fr",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/"
+        }
+      }
+    },
+    {
+      "tag": "proxy-3",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "104.16.244.89",
+          "port": 443,
+          "users": [{
+            "id": "51a0af77-a60c-4d9b-81a4-f50e1b38d90b",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "yes.mytunnel.kdns.fr",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/"
+        }
+      }
+    },
+    {
+      "tag": "proxy-4",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "104.17.107.127",
+          "port": 8443,
+          "users": [{
+            "id": "51a0af77-a60c-4d9b-81a4-f50e1b38d90b",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "yes.mytunnel.kdns.fr",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/"
+        }
+      }
+    },
+    {
+      "tag": "proxy-5",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "108.162.198.1",
+          "port": 8443,
+          "users": [{
+            "id": "51a0af77-a60c-4d9b-81a4-f50e1b38d90b",
+            "encryption": "none"
+          }]
+        }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "yes.mytunnel.kdns.fr",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/"
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["socks-in", "http-in"],
+        "balancerTag": "proxy-balancer"
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "proxy-balancer",
+        "selector": ["proxy-1", "proxy-2", "proxy-3", "proxy-4", "proxy-5"],
+        "strategy": {
+          "type": "random"
+        }
+      }
+    ]
+  }
+}
