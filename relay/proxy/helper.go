@@ -2,67 +2,50 @@ package proxy
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/QuantumNous/new-api/relay/common"
+
 	"github.com/gin-gonic/gin"
 )
 
-// WrapHTTPClientWithProxy 为特定渠道包装 HTTP 客户端，支持动态代理切换
-func WrapHTTPClientWithProxy(c *gin.Context, info *common.RelayInfo, baseClient *http.Client) *http.Client {
+// ResolveProxyURL 返回渠道在当前降级状态下应使用的代理地址，空字符串表示直连。
+// 处于代理模式时会先应用排队延迟，再返回代理地址。
+//
+// 返回值直接传给 service.GetHttpClientWithProxy，由项目统一的客户端工厂负责
+// 超时、重定向校验、TLS 与连接池配置，这里不自行构造 http.Client。
+func ResolveProxyURL(c *gin.Context, info *common.RelayInfo) string {
 	if info == nil || info.ChannelId == 0 {
-		return baseClient
+		return ""
 	}
 
 	manager := GetDegradedManager()
 	if !manager.IsEnabled(info.ChannelId) {
-		return baseClient
+		return ""
 	}
 
-	// 应用排队延迟（代理模式下）
-	manager.ApplyQueueDelay(c.Request.Context(), info.ChannelId)
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	manager.ApplyQueueDelay(ctx, info.ChannelId)
 
-	// 返回适合当前模式的 HTTP 客户端
-	return manager.GetHTTPClient(info.ChannelId)
+	return manager.ResolveProxyURL(info.ChannelId)
 }
 
-// RecordResponseForProxy 记录响应，用于动态调整代理模式
+// RecordResponseForProxy 记录响应，用于驱动降级/恢复状态机
 func RecordResponseForProxy(info *common.RelayInfo, statusCode int, isSuccess bool) {
 	if info == nil || info.ChannelId == 0 {
 		return
 	}
-
-	manager := GetDegradedManager()
-	if !manager.IsEnabled(info.ChannelId) {
-		return
-	}
-
-	manager.RecordResponse(info.ChannelId, statusCode, isSuccess)
+	GetDegradedManager().RecordResponse(info.ChannelId, statusCode, isSuccess)
 }
 
 // GetProxyStats 获取渠道代理统计信息
 func GetProxyStats(channelID int) map[string]interface{} {
-	manager := GetDegradedManager()
-	return manager.GetStats(channelID)
+	return GetDegradedManager().GetStats(channelID)
 }
 
 // ResetProxyState 重置渠道代理状态
 func ResetProxyState(channelID int) {
-	manager := GetDegradedManager()
-	manager.ResetState(channelID)
-}
-
-// WithProxyContext 在 context 中标记是否使用代理
-func WithProxyContext(ctx context.Context, useProxy bool) context.Context {
-	return context.WithValue(ctx, "use_proxy", useProxy)
-}
-
-// IsUsingProxy 检查 context 是否使用代理
-func IsUsingProxy(ctx context.Context) bool {
-	val := ctx.Value("use_proxy")
-	if val == nil {
-		return false
-	}
-	useProxy, ok := val.(bool)
-	return ok && useProxy
+	GetDegradedManager().ResetState(channelID)
 }
