@@ -9,10 +9,10 @@ name: Custom — Sync upstream
 # we never force-push or commit conflict markers.
 
 on:
-  schedule:
-    # Every Friday at 11:07 UTC = Friday 19:07 Beijing time (UTC+8).
-    # Off-the-:00 minute on purpose to avoid the cron herd.
-    - cron: '7 11 * * 5'
+  # schedule:
+  #   # Every Friday at 11:07 UTC = Friday 19:07 Beijing time (UTC+8).
+  #   # Off-the-:00 minute on purpose to avoid the cron herd.
+  #   - cron: '7 11 * * 5'
   workflow_dispatch:
 
 permissions:
