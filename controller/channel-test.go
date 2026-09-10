@@ -246,6 +246,8 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	info.IsChannelTest = true
 	info.InitChannelMeta(c)
+	finishResponseModel := relaycommon.WrapResponseModelWriter(c, testModel, relayFormat)
+	defer finishResponseModel()
 
 	err = attachTestBillingRequestInput(info, request)
 	if err != nil {

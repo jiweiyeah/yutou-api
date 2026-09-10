@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
+
 import { BadgeCell, DataTableColumnHeader } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { LongText } from '@/components/long-text'
@@ -30,7 +31,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatNumber, formatQuota, formatTimestamp } from '@/lib/format'
-import { cn } from '@/lib/utils'
+
 import {
   USER_STATUS,
   USER_STATUSES,
@@ -192,9 +193,11 @@ export function useUsersColumns(): ColumnDef<User>[] {
         }
         return (
           <div className='flex flex-col gap-0.5'>
-            <span className='font-medium tabular-nums'>{formatQuota(quota)}</span>
+            <span className='font-medium tabular-nums'>
+              {formatQuota(quota)}
+            </span>
             {money > 0 && (
-              <span className='text-xs text-muted-foreground tabular-nums'>
+              <span className='text-muted-foreground text-xs tabular-nums'>
                 {formatNumber(money)} {t('paid')}
               </span>
             )}

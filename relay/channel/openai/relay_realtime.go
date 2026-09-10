@@ -24,6 +24,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	info.IsStream = true
 	clientConn := info.ClientWs
 	targetConn := info.TargetWs
+	var responseModel *relaycommon.ResponseModelRewriter
+	if info.ChannelSetting.ResponseModelName {
+		responseModel = relaycommon.NewResponseModelRewriter(info.OriginModelName, types.RelayFormatOpenAIRealtime)
+	}
 
 	clientClosed := make(chan struct{})
 	targetClosed := make(chan struct{})
@@ -187,6 +191,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					localUsage.OutputTokenDetails.AudioTokens += audioToken
 				}
 
+				if responseModel != nil {
+					message = responseModel.Rewrite(message)
+				}
 				err = helper.WssString(c, clientConn, string(message))
 				if err != nil {
 					errChan <- fmt.Errorf("error writing to client: %v", err)

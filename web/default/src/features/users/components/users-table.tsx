@@ -16,10 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import type { SortingState } from '@tanstack/react-table'
+import type { OnChangeFn, SortingState } from '@tanstack/react-table'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -151,9 +151,11 @@ export function UsersTable() {
 
       // ===== CUSTOM START: derive order_by / order_dir from sorting state =====
       const sortCol = sorting[0]
-      const orderBy =
-        sortCol?.id === 'total_topup' ? 'total_topup' : ''
-      const orderDir = sortCol ? (sortCol.desc ? 'desc' : 'asc') : ''
+      const orderBy = sortCol?.id === 'total_topup' ? 'total_topup' : ''
+      let orderDir = ''
+      if (sortCol) {
+        orderDir = sortCol.desc ? 'desc' : 'asc'
+      }
       const hasSorting = Boolean(orderBy)
       // ===== CUSTOM END =====
 
@@ -203,8 +205,6 @@ export function UsersTable() {
     pagination,
     // ===== CUSTOM: controlled sorting + server-side ordering =====
     sorting,
-    onSortingChange: setSorting,
-    manualSorting: true,
     globalFilterFn: (row, _columnId, filterValue) => {
       const searchValue = String(filterValue).toLowerCase()
       const fields = [
@@ -264,13 +264,10 @@ export function UsersTable() {
           },
         ],
       }}
-      getRowClassName={(row, { isMobile }) =>
-        isDisabledUserRow(row.original)
-          ? isMobile
-            ? DISABLED_ROW_MOBILE
-            : DISABLED_ROW_DESKTOP
-          : undefined
-      }
+      getRowClassName={(row, { isMobile }) => {
+        if (!isDisabledUserRow(row.original)) return undefined
+        return isMobile ? DISABLED_ROW_MOBILE : DISABLED_ROW_DESKTOP
+      }}
       bulkActions={<DataTableBulkActions table={table} />}
     />
   )

@@ -280,6 +280,7 @@ const SENSITIVE_FORM_FIELDS = [
   'vertex_key_type',
   'aws_key_type',
   'azure_responses_version',
+  'response_model_name',
   'force_format',
   'thinking_to_content',
   'proxy',
@@ -334,6 +335,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.weight ||
     values.proxy?.trim() ||
     values.system_prompt?.trim() ||
+    values.response_model_name ||
     values.force_format ||
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
@@ -737,6 +739,7 @@ export function ChannelMutateDrawer({
   const currentStatusCodeMapping = form.watch('status_code_mapping')
   const currentParamOverride = form.watch('param_override')
   const currentHeaderOverride = form.watch('header_override')
+  const currentResponseModelName = form.watch('response_model_name')
   const currentForceFormat = form.watch('force_format')
   const currentThinkingToContent = form.watch('thinking_to_content')
   const currentPassThroughBodyEnabled = form.watch('pass_through_body_enabled')
@@ -1007,6 +1010,7 @@ export function ChannelMutateDrawer({
     hasConfiguredOverrideValue(currentHeaderOverride)
   )
   const extraSettingsConfigured = Boolean(
+    currentResponseModelName ||
     currentForceFormat ||
     currentThinkingToContent ||
     currentPassThroughBodyEnabled ||
@@ -4094,6 +4098,34 @@ export function ChannelMutateDrawer({
                                   )}
                                 />
                               )}
+
+                              <FormField
+                                control={form.control}
+                                name='response_model_name'
+                                render={({ field }) => (
+                                  <FormItem className='flex items-center justify-between gap-4 px-4 py-3'>
+                                    <div className='min-w-0 space-y-0.5'>
+                                      <FormLabel>
+                                        {t(
+                                          'Use request model name in responses'
+                                        )}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          'Return the model name requested by the client in JSON and streaming responses, including Chat Completions, Messages and Responses.'
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <FormControl>
+                                      <Switch
+                                        className='shrink-0'
+                                        checked={field.value}
+                                        onCheckedChange={field.onChange}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
 
                               <FormField
                                 control={form.control}

@@ -126,6 +126,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
 	}
+	responseModel := relayInfo.OriginModelName
+	if compactRequest, ok := request.(*dto.OpenAIResponsesCompactionRequest); ok {
+		responseModel = compactRequest.Model
+	}
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -214,6 +218,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		finishResponseModel := relaycommon.WrapResponseModelWriter(c, responseModel, relayFormat)
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -224,6 +229,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		default:
 			newAPIError = relayHandler(c, relayInfo)
 		}
+		finishResponseModel()
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
