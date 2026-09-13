@@ -76,12 +76,22 @@ func memoryRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark s
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
+			// ===== CUSTOM START: trusted-caller rate limit bypass =====
+			if isRateLimitBypassed(c) {
+				return
+			}
+			// ===== CUSTOM END =====
 			redisRateLimiter(c, maxRequestNum, duration, mark)
 		}
 	} else {
 		// It's safe to call multi times.
 		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 		return func(c *gin.Context) {
+			// ===== CUSTOM START: trusted-caller rate limit bypass =====
+			if isRateLimitBypassed(c) {
+				return
+			}
+			// ===== CUSTOM END =====
 			memoryRateLimiter(c, maxRequestNum, duration, mark)
 		}
 	}
