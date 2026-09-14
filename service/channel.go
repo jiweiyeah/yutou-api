@@ -81,9 +81,19 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 		return true
 	}
 
+	keywords := operation_setting.AutomaticDisableKeywords
 	lowerMessage := strings.ToLower(err.Error())
-	search, _ := AcSearch(lowerMessage, operation_setting.AutomaticDisableKeywords, true)
-	return search
+	if search, _ := AcSearch(lowerMessage, keywords, true); search {
+		return true
+	}
+	// Upstreams answering with a non-JSON body degrade err.Error() to a generic
+	// "bad response status code N" that carries no keyword at all. Fall back to the
+	// captured upstream body before concluding the channel must stay enabled.
+	if body := err.UpstreamBody(); body != "" {
+		search, _ := AcSearch(strings.ToLower(body), keywords, true)
+		return search
+	}
+	return false
 }
 
 func ShouldEnableChannel(newAPIError *types.NewAPIError, status int) bool {

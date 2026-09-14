@@ -99,6 +99,11 @@ type NewAPIError struct {
 	errorCode           ErrorCode
 	StatusCode          int
 	Metadata            json.RawMessage
+	// upstreamBody keeps a truncated copy of the upstream response body. It is
+	// deliberately unexported so it can never be serialized to the downstream
+	// client or persisted into the error log; it is only read by the auto-disable
+	// keyword matching in service.ShouldDisableChannel.
+	upstreamBody string
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.
@@ -443,6 +448,25 @@ func ErrOptionWithStatusCode(statusCode int) NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.StatusCode = statusCode
 	}
+}
+
+// ErrOptionWithUpstreamBody attaches the raw upstream response body to the error.
+// Providers that answer with a non-JSON body would otherwise degrade to a generic
+// "bad response status code N" message and lose every hint about the real failure,
+// which silently defeats the AutomaticDisableKeywords matching.
+func ErrOptionWithUpstreamBody(body string) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.upstreamBody = body
+	}
+}
+
+// UpstreamBody returns the truncated upstream response body captured for this
+// error, or an empty string when no body was captured.
+func (e *NewAPIError) UpstreamBody() string {
+	if e == nil {
+		return ""
+	}
+	return e.upstreamBody
 }
 
 func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {

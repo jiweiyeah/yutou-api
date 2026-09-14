@@ -83,6 +83,20 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 	return claudeErr
 }
 
+// upstreamBodyKeywordLimit caps how much of an upstream error body is retained for
+// auto-disable keyword matching. Error payloads are normally short, but a
+// misbehaving upstream can return a huge document, so only a bounded prefix is kept.
+const upstreamBodyKeywordLimit = 4096
+
+// truncateUpstreamBody bounds the retained upstream body. Truncation is byte based
+// for speed; a cut multi-byte rune at the tail is harmless for keyword matching.
+func truncateUpstreamBody(body string) string {
+	if len(body) <= upstreamBodyKeywordLimit {
+		return body
+	}
+	return body[:upstreamBodyKeywordLimit]
+}
+
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 
@@ -94,6 +108,16 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	var errResponse dto.GeneralErrorResponse
 	responseBodyText := string(responseBody)
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)
+	// Whatever error shape we build below, attach the raw upstream body so that
+	// auto-disable keyword matching still sees the provider's real reason even when
+	// the payload is not valid JSON (plain text errors used to degrade to a generic
+	// "bad response status code N" and silently escaped every disable rule).
+	// The body is stored apart from Err, so it reaches neither the client nor the log.
+	defer func() {
+		if newApiErr != nil {
+			types.ErrOptionWithUpstreamBody(truncateUpstreamBody(responseBodyText))(newApiErr)
+		}
+	}()
 	buildErrWithBody := func(message string) error {
 		if message == "" {
 			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)

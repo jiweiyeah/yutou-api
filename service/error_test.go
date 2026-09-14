@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -171,5 +173,66 @@ func withDebugEnabled(t *testing.T, enabled bool) {
 	common.DebugEnabled = enabled
 	t.Cleanup(func() {
 		common.DebugEnabled = oldDebug
+	})
+}
+
+func TestRelayErrorHandlerRetainsUpstreamBodyForNonJSON(t *testing.T) {
+	body := "Braintrust gateway error: Braintrust model 'glm-5.3-flash' unauthorized, insufficient credit balance"
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.NotNil(t, newAPIError)
+	// The client facing message stays generic and must not leak the upstream body.
+	require.Equal(t, "bad response status code 403", newAPIError.Error())
+	// The body is still retained so auto-disable keyword matching can read it.
+	require.Equal(t, body, newAPIError.UpstreamBody())
+}
+
+func TestRelayErrorHandlerTruncatesLongUpstreamBody(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(strings.NewReader(strings.Repeat("a", upstreamBodyKeywordLimit+100))),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.Len(t, newAPIError.UpstreamBody(), upstreamBodyKeywordLimit)
+}
+
+func TestShouldDisableChannelMatchesKeywordsInUpstreamBody(t *testing.T) {
+	oldKeywords := operation_setting.AutomaticDisableKeywords
+	oldEnabled := common.AutomaticDisableChannelEnabled
+	t.Cleanup(func() {
+		operation_setting.AutomaticDisableKeywords = oldKeywords
+		common.AutomaticDisableChannelEnabled = oldEnabled
+	})
+	common.AutomaticDisableChannelEnabled = true
+	operation_setting.AutomaticDisableKeywords = []string{"INSUFFICIENT"}
+
+	t.Run("plain text body still disables channel", func(t *testing.T) {
+		apiErr := types.NewError(errors.New("bad response status code 403"),
+			types.ErrorCodeBadResponseStatusCode,
+			types.ErrOptionWithStatusCode(http.StatusForbidden),
+			types.ErrOptionWithUpstreamBody("unauthorized, insufficient credit balance"))
+		require.True(t, ShouldDisableChannel(apiErr))
+	})
+
+	t.Run("generic message alone keeps channel enabled", func(t *testing.T) {
+		apiErr := types.NewError(errors.New("bad response status code 403"),
+			types.ErrorCodeBadResponseStatusCode,
+			types.ErrOptionWithStatusCode(http.StatusForbidden))
+		require.False(t, ShouldDisableChannel(apiErr))
+	})
+
+	t.Run("body without keyword keeps channel enabled", func(t *testing.T) {
+		apiErr := types.NewError(errors.New("bad response status code 403"),
+			types.ErrorCodeBadResponseStatusCode,
+			types.ErrOptionWithStatusCode(http.StatusForbidden),
+			types.ErrOptionWithUpstreamBody("temporarily unavailable"))
+		require.False(t, ShouldDisableChannel(apiErr))
 	})
 }
