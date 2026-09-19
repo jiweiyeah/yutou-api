@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -159,6 +160,115 @@ func TestRunTokenHarborKeyScanRebuildsKeyStateFromProbe(t *testing.T) {
 	assert.Contains(t, stored.ChannelInfo.MultiKeyDisabledReason[1], "401")
 	assert.Contains(t, stored.ChannelInfo.MultiKeyDisabledReason[2], "503")
 	assert.NotContains(t, stored.ChannelInfo.MultiKeyDisabledReason, 3)
+}
+
+// tokenHarborFailingTransport fails every request at the transport layer,
+// simulating DNS/connect/timeout failures that never reach the upstream.
+type tokenHarborFailingTransport struct{}
+
+func (tokenHarborFailingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("simulated network failure")
+}
+
+func TestRunTokenHarborKeyScanLeavesStateAloneWhenProbesNeverReachUpstream(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	oldDB := model.DB
+	oldHTTPClient := httpClient
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	t.Cleanup(func() {
+		model.DB = oldDB
+		httpClient = oldHTTPClient
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	t.Setenv("TOKENHARBOR_SCAN_CONCURRENCY", "2")
+
+	httpClient = &http.Client{Transport: tokenHarborFailingTransport{}}
+
+	autoBan := 1
+	baseURL := "https://tokenharbor.ai/v1/chat/completions"
+	channel := &model.Channel{
+		Id:          3,
+		Type:        constant.ChannelTypeCustom,
+		Name:        "tokenharbor",
+		Key:         "key-a\nkey-b\nkey-c",
+		Status:      common.ChannelStatusEnabled,
+		BaseURL:     &baseURL,
+		AutoBan:     &autoBan,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	summary, err := RunTokenHarborKeyScan(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, summary.KeysChecked)
+	assert.Equal(t, 3, summary.IndeterminateKeys)
+	assert.Zero(t, summary.KeysDisabled, "a probe that never reached the upstream must not disable a key")
+	assert.Zero(t, summary.UnauthorizedKeys)
+	assert.Zero(t, summary.UnavailableKeys)
+	assert.False(t, summary.DisableGuardHit)
+
+	var stored model.Channel
+	require.NoError(t, db.First(&stored, "id = ?", 3).Error)
+	assert.Empty(t, stored.ChannelInfo.MultiKeyStatusList)
+}
+
+func TestRunTokenHarborKeyScanReportsBadBaseURLAsChannelError(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	oldDB := model.DB
+	oldHTTPClient := httpClient
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	t.Cleanup(func() {
+		model.DB = oldDB
+		httpClient = oldHTTPClient
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	httpClient = server.Client()
+
+	autoBan := 1
+	// A scheme-relative base URL: the host matches the provider, but there is
+	// no scheme, so no probe endpoint can be derived from it.
+	hostless := "//tokenharbor.ai/v1"
+	channel := &model.Channel{
+		Id:          4,
+		Type:        constant.ChannelTypeCustom,
+		Name:        "tokenharbor",
+		Key:         "key-a\nkey-b",
+		Status:      common.ChannelStatusEnabled,
+		BaseURL:     &hostless,
+		AutoBan:     &autoBan,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	summary, err := RunTokenHarborKeyScan(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, summary.Channels)
+	assert.Equal(t, 1, summary.ChannelErrors)
+	assert.Zero(t, summary.KeysChecked, "a bad base URL yields no probe jobs at all")
+	assert.Zero(t, summary.KeysDisabled)
 }
 
 func TestRunTokenHarborKeyScanSkipsDisableWhenUpstreamIsDown(t *testing.T) {

@@ -34,34 +34,41 @@ const (
 // so the pool state always reflects the last probe rather than accumulated
 // traffic history.
 type TokenHarborKeyScanSummary struct {
-	Channels         int  `json:"channels"`
-	KeysChecked      int  `json:"keys_checked"`
-	KeysEnabled      int  `json:"keys_enabled"`
-	KeysDisabled     int  `json:"keys_disabled"`
-	UnauthorizedKeys int  `json:"unauthorized_keys"`
-	UnavailableKeys  int  `json:"unavailable_keys"`
-	RequestErrors    int  `json:"request_errors"`
-	SkippedKeys      int  `json:"skipped_keys"`
-	DisableGuardHit  bool `json:"disable_guard_tripped"`
-	EnableErrors     int  `json:"enable_errors"`
-	DisableErrors    int  `json:"disable_errors"`
+	Channels          int  `json:"channels"`
+	KeysChecked       int  `json:"keys_checked"`
+	KeysEnabled       int  `json:"keys_enabled"`
+	KeysDisabled      int  `json:"keys_disabled"`
+	UnauthorizedKeys  int  `json:"unauthorized_keys"`
+	UnavailableKeys   int  `json:"unavailable_keys"`
+	IndeterminateKeys int  `json:"indeterminate_keys"`
+	SkippedKeys       int  `json:"skipped_keys"`
+	ChannelErrors     int  `json:"channel_errors"`
+	DisableGuardHit   bool `json:"disable_guard_tripped"`
+	EnableErrors      int  `json:"enable_errors"`
+	DisableErrors     int  `json:"disable_errors"`
 }
 
 type tokenHarborProbe struct {
-	channel *model.Channel
-	key     string
-	index   int
+	channel  *model.Channel
+	key      string
+	index    int
+	probeURL string
+	client   *http.Client
 }
 
 // tokenHarborVerdict is the probe outcome for a single key. Unauthorized and
 // Unavailable are kept apart so the summary can tell a revoked key from a key
-// the upstream could not serve right now.
+// the upstream could not serve right now. Indeterminate covers probes that
+// never got an answer out of the upstream at all (DNS, connect, timeout):
+// those say nothing about the key, so they never change its state — otherwise
+// a network blip would disable healthy keys until the next pass.
 type tokenHarborVerdict int
 
 const (
 	tokenHarborVerdictHealthy tokenHarborVerdict = iota
 	tokenHarborVerdictUnauthorized
 	tokenHarborVerdictUnavailable
+	tokenHarborVerdictIndeterminate
 )
 
 type tokenHarborProbeResult struct {
@@ -95,13 +102,34 @@ func RunTokenHarborKeyScan(ctx context.Context, report func(processed, total int
 			summary.SkippedKeys += len(channel.GetKeys())
 			continue
 		}
+		// The probe endpoint and client are channel-scoped, so a misconfigured
+		// base URL or proxy is reported once per channel instead of being
+		// mistaken for every key in it having gone bad.
+		probeURL, err := tokenHarborModelsURL(channel.GetBaseURL())
+		if err != nil {
+			summary.ChannelErrors++
+			common.SysError(fmt.Sprintf("TokenHarbor probe URL unavailable for channel #%d: %v", channel.Id, err))
+			continue
+		}
+		client, err := GetHttpClientWithProxy(channel.GetSetting().Proxy)
+		if err != nil {
+			summary.ChannelErrors++
+			common.SysError(fmt.Sprintf("TokenHarbor probe client unavailable for channel #%d: %v", channel.Id, err))
+			continue
+		}
 		for index, key := range channel.GetKeys() {
 			key = strings.TrimSpace(key)
 			if key == "" {
 				summary.SkippedKeys++
 				continue
 			}
-			jobs = append(jobs, tokenHarborProbe{channel: channel, key: key, index: index})
+			jobs = append(jobs, tokenHarborProbe{
+				channel:  channel,
+				key:      key,
+				index:    index,
+				probeURL: probeURL,
+				client:   client,
+			})
 		}
 	}
 
@@ -164,6 +192,9 @@ func RunTokenHarborKeyScan(ctx context.Context, report func(processed, total int
 				enableByChannel[channelID] = append(enableByChannel[channelID], result.probe.key)
 			}
 			continue
+		case tokenHarborVerdictIndeterminate:
+			summary.IndeterminateKeys++
+			continue
 		case tokenHarborVerdictUnauthorized:
 			summary.UnauthorizedKeys++
 		default:
@@ -224,35 +255,22 @@ func IsTokenHarborChannel(channel *model.Channel) bool {
 func probeTokenHarborKey(ctx context.Context, job tokenHarborProbe) tokenHarborProbeResult {
 	result := tokenHarborProbeResult{probe: job}
 
-	probeURL, err := tokenHarborModelsURL(job.channel.GetBaseURL())
-	if err != nil {
-		result.verdict = tokenHarborVerdictUnavailable
-		result.detail = fmt.Sprintf("TokenHarbor probe URL invalid: %v", err)
-		return result
-	}
-
 	requestCtx, cancel := context.WithTimeout(ctx, tokenHarborProbeTimeout)
 	defer cancel()
 
-	client, err := GetHttpClientWithProxy(job.channel.GetSetting().Proxy)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, job.probeURL, nil)
 	if err != nil {
-		result.verdict = tokenHarborVerdictUnavailable
-		result.detail = fmt.Sprintf("TokenHarbor probe client error: %v", err)
-		return result
-	}
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		result.verdict = tokenHarborVerdictUnavailable
+		result.verdict = tokenHarborVerdictIndeterminate
 		result.detail = fmt.Sprintf("TokenHarbor probe request error: %v", err)
 		return result
 	}
 	req.Header.Set("Authorization", "Bearer "+job.key)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := job.client.Do(req)
 	if err != nil {
-		result.verdict = tokenHarborVerdictUnavailable
-		result.detail = fmt.Sprintf("TokenHarbor probe failed: %v", err)
+		result.verdict = tokenHarborVerdictIndeterminate
+		result.detail = fmt.Sprintf("TokenHarbor probe never reached the upstream: %v", err)
 		return result
 	}
 	defer func() {
