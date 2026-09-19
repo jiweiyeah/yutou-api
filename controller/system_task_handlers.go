@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -78,18 +79,30 @@ func (deepSeekFreeTierRecoveryHandler) Enabled() bool {
 }
 
 func (deepSeekFreeTierRecoveryHandler) Interval() time.Duration {
-	minutes := common.GetEnvOrDefault("DEEPSEEK_FREE_TIER_RECOVERY_INTERVAL_MINUTES", 5)
+	minutes := common.GetEnvOrDefault("DEEPSEEK_FREE_TIER_RECOVERY_INTERVAL_MINUTES", 360)
 	if minutes < 1 {
-		minutes = 5
+		minutes = 360
 	}
 	return time.Duration(minutes) * time.Minute
 }
 
 func (deepSeekFreeTierRecoveryHandler) NewPayload() any { return nil }
 
+// freeTierRecoveryTaskSummary combines both halves of one recovery pass: the
+// DeepSeek keys restored after their free-tier reset window, and the
+// TokenHarbor pool re-probed against the upstream.
+type freeTierRecoveryTaskSummary struct {
+	DeepSeek    service.DeepSeekFreeTierRecoverySummary `json:"deepseek"`
+	TokenHarbor service.TokenHarborKeyScanSummary       `json:"tokenharbor"`
+}
+
 func (deepSeekFreeTierRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary, err := service.RunDeepSeekFreeTierRecovery(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	if err != nil {
+	report := service.NewSystemTaskProgressReporter(task, runnerID)
+	deepSeekSummary, deepSeekErr := service.RunDeepSeekFreeTierRecovery(ctx, report)
+	tokenHarborSummary, tokenHarborErr := service.RunTokenHarborKeyScan(ctx, report)
+
+	summary := freeTierRecoveryTaskSummary{DeepSeek: deepSeekSummary, TokenHarbor: tokenHarborSummary}
+	if err := errors.Join(deepSeekErr, tokenHarborErr); err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return
 	}

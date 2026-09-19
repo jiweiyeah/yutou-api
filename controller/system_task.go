@@ -34,6 +34,27 @@ func CreateLogCleanupSystemTask(c *gin.Context) {
 	})
 }
 
+// CreateFreeTierRecoverySystemTask queues one free-tier recovery pass right
+// away (DeepSeek keys restored after their reset window + the TokenHarbor key
+// pool re-probed against the upstream) instead of waiting for the interval.
+func CreateFreeTierRecoverySystemTask(c *gin.Context) {
+	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeDeepSeekFreeTierRecovery, nil)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	message := ""
+	if !created {
+		message = "a free-tier recovery task is already active"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": message,
+		"data":    task.ToResponse(),
+	})
+}
+
 func GetCurrentSystemTask(c *gin.Context) {
 	taskType := c.Query("type")
 	if taskType == "" {

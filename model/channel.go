@@ -1107,6 +1107,111 @@ func AutoDisableChannelKeys(channelId int, reasonsByKey map[string]string) (int,
 	return disabledCount, nil
 }
 
+// EnableChannelKeys re-enables several keys with one database write, undoing an
+// earlier automatic disable (permanent or lease-based). Keys that were removed
+// or already enabled while the caller was probing are ignored, and a manually
+// disabled channel is never touched. The channel itself is re-enabled only when
+// it was auto-disabled and at least one key is usable again.
+func EnableChannelKeys(channelId int, keysToEnable []string) (int, error) {
+	if len(keysToEnable) == 0 {
+		return 0, nil
+	}
+
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	targets := make(map[string]struct{}, len(keysToEnable))
+	for _, key := range keysToEnable {
+		targets[strings.TrimSpace(key)] = struct{}{}
+	}
+
+	var (
+		channel        Channel
+		previousStatus int
+		enabledCount   int
+	)
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status == common.ChannelStatusManuallyDisabled {
+			return nil
+		}
+
+		previousStatus = channel.Status
+		keys := channel.GetKeys()
+		if !channel.ChannelInfo.IsMultiKey {
+			if _, ok := targets[strings.TrimSpace(channel.Key)]; !ok {
+				return nil
+			}
+			if channel.Status != common.ChannelStatusAutoDisabled {
+				return nil
+			}
+			channel.Status = common.ChannelStatusEnabled
+			channel.ChannelInfo.AutoDisabledUntil = 0
+			info := channel.GetOtherInfo()
+			delete(info, "status_reason")
+			delete(info, "status_time")
+			channel.SetOtherInfo(info)
+			enabledCount = 1
+		} else {
+			for index, key := range keys {
+				if _, ok := targets[strings.TrimSpace(key)]; !ok {
+					continue
+				}
+				status, exists := channel.ChannelInfo.MultiKeyStatusList[index]
+				if !exists || status == common.ChannelStatusEnabled {
+					continue
+				}
+				delete(channel.ChannelInfo.MultiKeyStatusList, index)
+				delete(channel.ChannelInfo.MultiKeyDisabledReason, index)
+				delete(channel.ChannelInfo.MultiKeyDisabledTime, index)
+				delete(channel.ChannelInfo.MultiKeyDisabledUntil, index)
+				enabledCount++
+			}
+			if enabledCount > 0 && channel.Status == common.ChannelStatusAutoDisabled && hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+				info := channel.GetOtherInfo()
+				statusReason, _ := info["status_reason"].(string)
+				if statusReason == "" || statusReason == "All keys are disabled" {
+					channel.Status = common.ChannelStatusEnabled
+					delete(info, "status_reason")
+					delete(info, "status_time")
+					channel.SetOtherInfo(info)
+				}
+			}
+		}
+
+		if enabledCount == 0 {
+			return nil
+		}
+		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+			"channel_info": channel.ChannelInfo,
+			"other_info":   channel.OtherInfo,
+			"status":       channel.Status,
+		}).Error
+	})
+	if err != nil || enabledCount == 0 {
+		return enabledCount, err
+	}
+
+	if previousStatus != channel.Status {
+		if err := UpdateAbilityStatus(channel.Id, channel.Status == common.ChannelStatusEnabled); err != nil {
+			return enabledCount, err
+		}
+		if channel.Status == common.ChannelStatusEnabled {
+			InitChannelCache()
+			return enabledCount, nil
+		}
+		CacheUpdateChannelStatus(channel.Id, channel.Status)
+	}
+	channel.Keys = channel.GetKeys()
+	CacheUpdateChannel(&channel)
+	return enabledCount, nil
+}
+
 func EnableChannelByTag(tag string) error {
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
@@ -1448,6 +1553,15 @@ func GetEnabledChannelsWithKeysByType(channelType int) ([]*Channel, error) {
 func GetChannelsByTypeWithKeys(channelType int) ([]*Channel, error) {
 	var channels []*Channel
 	err := DB.Where("type = ?", channelType).Order("id asc").Find(&channels).Error
+	return channels, err
+}
+
+// GetChannelsWithKeys returns every channel row with its keys loaded, including
+// disabled ones. Provider maintenance jobs that identify their targets by base
+// URL rather than by channel type use this instead of the type-scoped variants.
+func GetChannelsWithKeys() ([]*Channel, error) {
+	var channels []*Channel
+	err := DB.Order("id asc").Find(&channels).Error
 	return channels, err
 }
 
