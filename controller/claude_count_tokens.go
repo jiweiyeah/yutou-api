@@ -20,7 +20,12 @@ import (
 func CountClaudeTokens(c *gin.Context) {
 	request, err := helper.GetAndValidateClaudeRequest(c)
 	if err != nil {
-		newAPIError := types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest)
+		// 用 Claude 原生错误类型：Anthropic 客户端会按 error.type 分支处理，
+		// 默认的 new_api_error 不在其已知类型里。
+		newAPIError := types.WithClaudeError(types.ClaudeError{
+			Type:    "invalid_request_error",
+			Message: err.Error(),
+		}, http.StatusBadRequest)
 		c.JSON(newAPIError.StatusCode, gin.H{
 			"type":  "error",
 			"error": newAPIError.ToClaudeError(),
