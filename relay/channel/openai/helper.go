@@ -109,7 +109,12 @@ func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, res
 
 func processTokenData(relayMode int, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
 	switch relayMode {
-	case relayconstant.RelayModeChatCompletions:
+	// RelayModeUnknown 是 Path2RelayMode 对未映射文本端点的兜底值，目前只有 /v1/messages 会命中。
+	// 这类请求在 OpenAI 兼容上游会被转成 chat completions 形态（advancedcustom 的
+	// claude_messages_to_openai_chat 转换器同理），响应也是 chat SSE，所以要和
+	// RelayModeChatCompletions 一样解析；否则 responseTextBuilder 恒空，上游未回 usage 时
+	// completion_tokens 会被本地兜底算成 0（表现为输出 token 不计费）。
+	case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeUnknown:
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			return err

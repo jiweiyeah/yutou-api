@@ -411,3 +411,50 @@ func CountTextToken(text string, model string) int {
 		return EstimateTokenByModel(model, text)
 	}
 }
+
+// CountClaudeMessagesInputTokens 估算 Claude Messages 请求的输入 token 数，供
+// /v1/messages/count_tokens 使用（Anthropic 语义下该接口只返回 input_tokens）。
+//
+// 这是本地估算而非上游精确计数：文本走本仓库的 tokenizer（OpenAI 模型用 tiktoken，
+// 其余走启发式估算），消息结构开销与媒体按固定值粗估，取值与 EstimateRequestToken 对齐。
+func CountClaudeMessagesInputTokens(request *dto.ClaudeRequest) int {
+	if request == nil {
+		return 0
+	}
+	meta := request.GetTokenCountMeta()
+	if meta == nil {
+		return 0
+	}
+
+	tokens := CountTextToken(meta.CombineText, request.Model)
+	tokens += meta.MessagesCount * 3 // 每条消息的角色与分隔符开销
+	tokens += meta.NameCount * 3
+	tokens += 3 // 请求头部固定开销
+	for _, file := range meta.Files {
+		// 精确计数需要下载并解码媒体，对元数据接口代价过高，这里按类型给固定值。
+		switch file.FileType {
+		case types.FileTypeImage:
+			tokens += 520
+		case types.FileTypeAudio:
+			tokens += 256
+		case types.FileTypeVideo:
+			tokens += 4096 * 2
+		default:
+			tokens += 4096
+		}
+	}
+
+	// 工具定义单独计入：meta.ToolsCount 与 CombineText 里的工具文本都依赖
+	// dto.ProcessTools 的类型分支，而请求体经 JSON 反序列化后 Tools 里是
+	// map[string]any，会被 ProcessTools 的 default 分支跳过，工具名/描述/schema
+	// 一律不进 CombineText。这里直接按原始 JSON 计入，避免漏算工具部分。
+	// 只在本函数内处理，不改动 ProcessTools，以免影响既有的 prompt token 估算口径。
+	if tools := request.GetTools(); len(tools) > 0 {
+		if raw, err := common.Marshal(tools); err == nil {
+			tokens += CountTextToken(string(raw), request.Model)
+		}
+		tokens += len(tools) * 8 // 每个工具定义的结构化开销
+	}
+
+	return tokens
+}

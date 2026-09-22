@@ -165,6 +165,16 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.DELETE("/models/:model", controller.RelayNotImplemented)
 	}
 
+	// /v1/messages/count_tokens 是纯本地估算：不选渠道、不生成、不计费，所以不挂
+	// Distribute；也不挂模型请求限流——它是元数据端点，不应占用模型调用配额。
+	countTokensRouter := router.Group("/v1/messages")
+	countTokensRouter.Use(middleware.RouteTag("relay"))
+	countTokensRouter.Use(middleware.SystemPerformanceCheck())
+	countTokensRouter.Use(middleware.TokenAuth())
+	{
+		countTokensRouter.POST("/count_tokens", controller.CountClaudeTokens)
+	}
+
 	relayMjRouter := router.Group("/mj")
 	relayMjRouter.Use(middleware.RouteTag("relay"))
 	relayMjRouter.Use(middleware.SystemPerformanceCheck())
