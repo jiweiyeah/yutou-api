@@ -114,8 +114,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 					c.Set("image_generation_call_size", streamResponse.Response.GetSize())
 				}
 			}
-		case "response.output_text.delta":
-			// 处理输出文本
+		case "response.output_text.delta",
+			"response.reasoning_text.delta",
+			"response.reasoning_summary_text.delta",
+			"response.function_call_arguments.delta":
+			// 累积模型真正产出的文本。reasoning 与工具参数的 delta 也必须计入：
+			// 有些上游（或输出全在 reasoning 里的模型）根本不发 output_text delta，
+			// 而 usage 只在最后的 response.completed 里——客户端提前断开时就没有
+			// 上游 usage 可兜底，completion_tokens 会被算成 0（表现为输出 token 不计费）。
 			responseTextBuilder.WriteString(streamResponse.Delta)
 		case dto.ResponsesOutputTypeItemDone:
 			// 函数调用处理
