@@ -190,6 +190,52 @@ func TestConvertOpenAIRequestClampsTokenRouterReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestClampsAtriaReasoningEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name     string
+		effort   string
+		expected string
+	}{
+		{name: "none folds to low", effort: "none", expected: "low"},
+		{name: "minimal folds to low", effort: "minimal", expected: "low"},
+		{name: "low is kept", effort: "low", expected: "low"},
+		{name: "medium is kept", effort: "medium", expected: "medium"},
+		{name: "high is kept", effort: "high", expected: "high"},
+		{name: "xhigh folds to high", effort: "xhigh", expected: "high"},
+		{name: "max folds to high", effort: "max", expected: "high"},
+		{name: "casing is ignored", effort: "XHIGH", expected: "high"},
+		{name: "unknown value is passed through", effort: "turbo", expected: "turbo"},
+		{name: "empty value stays empty", effort: "", expected: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{
+				ChannelMeta: &relaycommon.ChannelMeta{
+					ChannelType:       constant.ChannelTypeCustom,
+					ChannelBaseUrl:    "https://api.atria-asi.ai/v1/chat/completions",
+					UpstreamModelName: "Atria-Dawn-Preview",
+				},
+			}
+			request := &dto.GeneralOpenAIRequest{
+				Model:           "Atria-Dawn-Preview",
+				ReasoningEffort: tc.effort,
+				Messages:        []dto.Message{{Role: "user", Content: "hi"}},
+			}
+
+			converted, err := (&Adaptor{}).ConvertOpenAIRequest(c, info, request)
+
+			require.NoError(t, err)
+			openAIRequest, ok := converted.(*dto.GeneralOpenAIRequest)
+			require.True(t, ok)
+			assert.Equal(t, tc.expected, openAIRequest.ReasoningEffort)
+		})
+	}
+}
+
 func TestConvertOpenAIRequestKeepsReasoningEffortForOtherCustomChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

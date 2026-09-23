@@ -149,6 +149,39 @@ func normalizeTokenRouterReasoningEffort(effort string) string {
 	return normalized
 }
 
+// isAtriaASI reports whether the request targets Atria's OpenAI-compatible
+// endpoint, whose validator is stricter than the wider OpenAI scale.
+func isAtriaASI(info *relaycommon.RelayInfo) bool {
+	if info == nil || info.ChannelType != constant.ChannelTypeCustom {
+		return false
+	}
+	return strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.atria-asi.ai")
+}
+
+// Atria's chat endpoint accepts only the three lowercase reasoning levels and
+// rejects every other value with HTTP 422, so the wider OpenAI scale has to be
+// folded onto the levels it understands.
+var atriaReasoningEfforts = map[string]string{
+	"none":    "low",
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "medium",
+	"high":    "high",
+	"xhigh":   "high",
+	"max":     "high",
+}
+
+// normalizeAtriaReasoningEffort folds a reasoning effort onto Atria's
+// low/medium/high scale. Unknown values are passed through untouched so
+// upstream keeps reporting them instead of being silently rewritten.
+func normalizeAtriaReasoningEffort(effort string) string {
+	normalized, ok := atriaReasoningEfforts[strings.ToLower(strings.TrimSpace(effort))]
+	if !ok {
+		return effort
+	}
+	return normalized
+}
+
 func normalizeTokenRouterAssistantMessages(messages []dto.Message) []dto.Message {
 	for i := range messages {
 		message := &messages[i]
@@ -434,6 +467,12 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	// so clamp the requested level instead of letting the upstream return 400.
 	if request.ReasoningEffort != "" && isTokenRouterKimi(info) {
 		request.ReasoningEffort = normalizeTokenRouterReasoningEffort(request.ReasoningEffort)
+		info.ReasoningEffort = request.ReasoningEffort
+	}
+	// Atria's chat endpoint rejects reasoning efforts outside low/medium/high
+	// with HTTP 422, so clamp the requested level the same way.
+	if request.ReasoningEffort != "" && isAtriaASI(info) {
+		request.ReasoningEffort = normalizeAtriaReasoningEffort(request.ReasoningEffort)
 		info.ReasoningEffort = request.ReasoningEffort
 	}
 	isOModel := dto.IsOpenAIReasoningOModel(info.UpstreamModelName)
