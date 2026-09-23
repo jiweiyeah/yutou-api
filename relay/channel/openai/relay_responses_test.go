@@ -94,6 +94,31 @@ func TestOaiResponsesStreamHandlerCountsOutputTextDeltas(t *testing.T) {
 	require.Equal(t, 7, usage.PromptTokens)
 }
 
+func TestOaiResponsesStreamHandlerBillsPromptWhenNothingArrived(t *testing.T) {
+	// The client went away before any delta and before response.completed, so
+	// there is no upstream usage and no generated text to estimate from. The
+	// prompt was still processed upstream, and the chat path bills prompt tokens
+	// unconditionally (ResponseText2Usage), so this path must not leave the whole
+	// request unbilled.
+	body := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"test-model"}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	c, resp, info := newResponsesStreamContext(t, body, 13)
+
+	usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	require.Equal(t, 13, usage.PromptTokens, "prompt tokens must be billed even when no output arrived")
+	require.Equal(t, 0, usage.CompletionTokens)
+	require.Equal(t, 13, usage.TotalTokens)
+}
+
 func TestOaiResponsesStreamHandlerPrefersUpstreamUsage(t *testing.T) {
 	body := strings.Join([]string{
 		`event: response.reasoning_text.delta`,

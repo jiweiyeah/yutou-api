@@ -138,6 +138,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		}
 	})
 
+	if usage.PromptTokens == 0 {
+		// 上游没上报 usage（客户端提前断开时 response.completed 永远不会到达），
+		// 用本地估算兜底。chat 路径的 ResponseText2Usage 同样是无条件赋 prompt
+		// tokens——只补 completion 的话，"断开太早、一个 delta 都没收到"的请求会
+		// 两个值都停在 0，表现为整条请求一个 token 都不计费。
+		usage.PromptTokens = info.GetEstimatePromptTokens()
+	}
+
 	if usage.CompletionTokens == 0 {
 		// 计算输出文本的 token 数量
 		tempStr := responseTextBuilder.String()
@@ -146,10 +154,6 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			completionTokens := service.CountTextToken(tempStr, info.UpstreamModelName)
 			usage.CompletionTokens = completionTokens
 		}
-	}
-
-	if usage.PromptTokens == 0 && usage.CompletionTokens != 0 {
-		usage.PromptTokens = info.GetEstimatePromptTokens()
 	}
 
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
