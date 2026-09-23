@@ -70,6 +70,48 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 	}
 }
 
+// applySystemPromptToResponsesRequest injects the channel system prompt into a
+// converted /v1/responses request. The Responses API carries system-level text
+// in `instructions`, which the chat path has no equivalent for; when the route
+// converted the request into a chat request instead, the prompt is applied with
+// the same rules as the chat path.
+func applySystemPromptToResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, convertedRequest any) {
+	if info == nil || info.ChannelSetting.SystemPrompt == "" {
+		return
+	}
+	systemPrompt := info.ChannelSetting.SystemPrompt
+
+	switch request := convertedRequest.(type) {
+	case *dto.OpenAIResponsesRequest:
+		if len(request.Instructions) == 0 {
+			if b, err := common.Marshal(systemPrompt); err == nil {
+				request.Instructions = b
+			}
+			return
+		}
+		if !info.ChannelSetting.SystemPromptOverride {
+			return
+		}
+		var existing string
+		if err := common.Unmarshal(request.Instructions, &existing); err != nil {
+			if b, marshalErr := common.Marshal(systemPrompt); marshalErr == nil {
+				request.Instructions = b
+			}
+			return
+		}
+		common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+		merged := systemPrompt
+		if trimmed := strings.TrimSpace(existing); trimmed != "" {
+			merged = systemPrompt + "\n" + trimmed
+		}
+		if b, err := common.Marshal(merged); err == nil {
+			request.Instructions = b
+		}
+	case *dto.GeneralOpenAIRequest:
+		applySystemPromptIfNeeded(c, info, request)
+	}
+}
+
 func chatCompletionsViaResponses(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, request *dto.GeneralOpenAIRequest) (*dto.Usage, *types.NewAPIError) {
 	chatJSON, err := common.Marshal(request)
 	if err != nil {
