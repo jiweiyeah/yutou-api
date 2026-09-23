@@ -150,9 +150,12 @@ func normalizeTokenRouterReasoningEffort(effort string) string {
 }
 
 // isAtriaASI reports whether the request targets Atria's OpenAI-compatible
-// endpoint, whose validator is stricter than the wider OpenAI scale.
+// endpoint, whose validator is stricter than the wider OpenAI scale. The check
+// keys on the upstream host instead of the channel type: Advanced Custom (58)
+// channels delegate here with ChannelType rewritten to OpenAI, so a type gate
+// would silently skip the clamp.
 func isAtriaASI(info *relaycommon.RelayInfo) bool {
-	if info == nil || info.ChannelType != constant.ChannelTypeCustom {
+	if info == nil {
 		return false
 	}
 	return strings.Contains(strings.ToLower(info.ChannelBaseUrl), "api.atria-asi.ai")

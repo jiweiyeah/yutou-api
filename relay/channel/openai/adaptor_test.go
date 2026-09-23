@@ -236,6 +236,34 @@ func TestConvertOpenAIRequestClampsAtriaReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestClampsAtriaReasoningEffortForAdvancedCustom(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	// Advanced Custom (58) channels delegate to this adaptor with ChannelType
+	// rewritten to OpenAI, and their base URL carries no path. The clamp must
+	// still apply so that switching the channel type cannot silently bring the
+	// upstream 422s back.
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:       constant.ChannelTypeOpenAI,
+			ChannelBaseUrl:    "https://api.atria-asi.ai",
+			UpstreamModelName: "Atria-Dawn-Preview",
+		},
+	}
+	request := &dto.GeneralOpenAIRequest{
+		Model:           "Atria-Dawn-Preview",
+		ReasoningEffort: "xhigh",
+		Messages:        []dto.Message{{Role: "user", Content: "hi"}},
+	}
+
+	converted, err := (&Adaptor{}).ConvertOpenAIRequest(c, info, request)
+
+	require.NoError(t, err)
+	openAIRequest, ok := converted.(*dto.GeneralOpenAIRequest)
+	require.True(t, ok)
+	assert.Equal(t, "high", openAIRequest.ReasoningEffort)
+}
+
 func TestConvertOpenAIRequestKeepsReasoningEffortForOtherCustomChannels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
