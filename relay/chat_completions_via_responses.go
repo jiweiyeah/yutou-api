@@ -71,44 +71,57 @@ func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, requ
 }
 
 // applySystemPromptToResponsesRequest injects the channel system prompt into a
-// converted /v1/responses request. The Responses API carries system-level text
-// in `instructions`, which the chat path has no equivalent for; when the route
-// converted the request into a chat request instead, the prompt is applied with
-// the same rules as the chat path.
-func applySystemPromptToResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, convertedRequest any) {
+// converted /v1/responses request and returns the request to send upstream. The
+// Responses API carries system-level text in `instructions`, which the chat path
+// has no equivalent for; when the route converted the request into a chat
+// request instead, the prompt is applied with the same rules as the chat path.
+//
+// Adapters return dto.OpenAIResponsesRequest by value, so the caller must use
+// the returned request rather than relying on in-place mutation.
+func applySystemPromptToResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, convertedRequest any) any {
 	if info == nil || info.ChannelSetting.SystemPrompt == "" {
-		return
+		return convertedRequest
 	}
 	systemPrompt := info.ChannelSetting.SystemPrompt
 
 	switch request := convertedRequest.(type) {
+	case dto.OpenAIResponsesRequest:
+		applySystemPromptToInstructions(c, info, systemPrompt, &request)
+		return request
 	case *dto.OpenAIResponsesRequest:
-		if len(request.Instructions) == 0 {
-			if b, err := common.Marshal(systemPrompt); err == nil {
-				request.Instructions = b
-			}
-			return
-		}
-		if !info.ChannelSetting.SystemPromptOverride {
-			return
-		}
-		var existing string
-		if err := common.Unmarshal(request.Instructions, &existing); err != nil {
-			if b, marshalErr := common.Marshal(systemPrompt); marshalErr == nil {
-				request.Instructions = b
-			}
-			return
-		}
-		common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
-		merged := systemPrompt
-		if trimmed := strings.TrimSpace(existing); trimmed != "" {
-			merged = systemPrompt + "\n" + trimmed
-		}
-		if b, err := common.Marshal(merged); err == nil {
-			request.Instructions = b
-		}
+		applySystemPromptToInstructions(c, info, systemPrompt, request)
+		return request
 	case *dto.GeneralOpenAIRequest:
 		applySystemPromptIfNeeded(c, info, request)
+		return request
+	}
+	return convertedRequest
+}
+
+func applySystemPromptToInstructions(c *gin.Context, info *relaycommon.RelayInfo, systemPrompt string, request *dto.OpenAIResponsesRequest) {
+	if len(request.Instructions) == 0 {
+		if b, err := common.Marshal(systemPrompt); err == nil {
+			request.Instructions = b
+		}
+		return
+	}
+	if !info.ChannelSetting.SystemPromptOverride {
+		return
+	}
+	var existing string
+	if err := common.Unmarshal(request.Instructions, &existing); err != nil {
+		if b, marshalErr := common.Marshal(systemPrompt); marshalErr == nil {
+			request.Instructions = b
+		}
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
+	merged := systemPrompt
+	if trimmed := strings.TrimSpace(existing); trimmed != "" {
+		merged = systemPrompt + "\n" + trimmed
+	}
+	if b, err := common.Marshal(merged); err == nil {
+		request.Instructions = b
 	}
 }
 

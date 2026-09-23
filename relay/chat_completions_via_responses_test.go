@@ -30,47 +30,65 @@ func TestApplySystemPromptToResponsesRequest(t *testing.T) {
 		}
 	}
 
+	// Adapters hand back dto.OpenAIResponsesRequest by value, so the value case
+	// is the one that actually runs in production.
+	instructionsOf := func(t *testing.T, converted any) string {
+		t.Helper()
+		request, ok := converted.(dto.OpenAIResponsesRequest)
+		require.True(t, ok, "expected dto.OpenAIResponsesRequest, got %T", converted)
+		return string(request.Instructions)
+	}
+
 	t.Run("empty instructions get the channel prompt", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.OpenAIResponsesRequest{}
-		applySystemPromptToResponsesRequest(c, newInfo("GUARD", false), request)
-		assert.Equal(t, `"GUARD"`, string(request.Instructions))
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", false), dto.OpenAIResponsesRequest{})
+		assert.Equal(t, `"GUARD"`, instructionsOf(t, out))
 		assert.False(t, common.GetContextKeyBool(c, constant.ContextKeySystemPromptOverride))
 	})
 
 	t.Run("existing instructions are kept without override", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
-		applySystemPromptToResponsesRequest(c, newInfo("GUARD", false), request)
-		assert.Equal(t, `"client"`, string(request.Instructions))
+		in := dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", false), in)
+		assert.Equal(t, `"client"`, instructionsOf(t, out))
 	})
 
 	t.Run("override prepends to existing instructions", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
-		applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), request)
-		assert.Equal(t, `"GUARD\nclient"`, string(request.Instructions))
+		in := dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), in)
+		assert.Equal(t, `"GUARD\nclient"`, instructionsOf(t, out))
 		assert.True(t, common.GetContextKeyBool(c, constant.ContextKeySystemPromptOverride))
 	})
 
 	t.Run("override replaces blank instructions", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"   "`)}
-		applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), request)
+		in := dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"   "`)}
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), in)
+		assert.Equal(t, `"GUARD"`, instructionsOf(t, out))
+	})
+
+	t.Run("pointer requests are handled too", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", false), &dto.OpenAIResponsesRequest{})
+		request, ok := out.(*dto.OpenAIResponsesRequest)
+		require.True(t, ok, "expected *dto.OpenAIResponsesRequest, got %T", out)
 		assert.Equal(t, `"GUARD"`, string(request.Instructions))
 	})
 
 	t.Run("no channel prompt is a no-op", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
-		applySystemPromptToResponsesRequest(c, newInfo("", true), request)
-		assert.Equal(t, `"client"`, string(request.Instructions))
+		in := dto.OpenAIResponsesRequest{Instructions: json.RawMessage(`"client"`)}
+		out := applySystemPromptToResponsesRequest(c, newInfo("", true), in)
+		assert.Equal(t, `"client"`, instructionsOf(t, out))
 	})
 
 	t.Run("chat converted requests fall back to the chat rules", func(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		request := &dto.GeneralOpenAIRequest{Messages: []dto.Message{{Role: "user", Content: "hi"}}}
-		applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), request)
+		in := &dto.GeneralOpenAIRequest{Messages: []dto.Message{{Role: "user", Content: "hi"}}}
+		out := applySystemPromptToResponsesRequest(c, newInfo("GUARD", true), in)
+		request, ok := out.(*dto.GeneralOpenAIRequest)
+		require.True(t, ok)
 		require.Len(t, request.Messages, 2)
 		assert.Equal(t, "system", request.Messages[0].Role)
 		assert.Equal(t, "GUARD", request.Messages[0].StringContent())
