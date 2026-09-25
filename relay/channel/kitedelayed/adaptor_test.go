@@ -875,6 +875,26 @@ func TestAdaptorDoResponseKiteRouterStreamsResponsesEvents(t *testing.T) {
 	assert.Contains(t, body, "你好")
 }
 
+func TestAdaptorConvertOpenAIResponsesRequestForKiteRouter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+
+	var request dto.OpenAIResponsesRequest
+	require.NoError(t, common.Unmarshal([]byte(`{"model":"gpt-5.6-luna","input":"hi"}`), &request))
+
+	adaptor := &Adaptor{}
+	info := testRelayInfo("https://example.com"+routerMarker, false)
+	info.RelayMode = relayconstant.RelayModeResponses
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+
+	converted, err := adaptor.ConvertOpenAIResponsesRequest(ctx, info, request)
+	require.NoError(t, err)
+	chatReq, ok := converted.(*dto.GeneralOpenAIRequest)
+	require.True(t, ok, "Router 线必须把 responses 请求转成 chat completions 请求，否则上游回 422 Field required")
+	assert.NotEmpty(t, chatReq.Messages)
+}
+
 func testRelayInfo(baseURL string, stream bool) *relaycommon.RelayInfo {
 	return &relaycommon.RelayInfo{
 		IsStream:    stream,

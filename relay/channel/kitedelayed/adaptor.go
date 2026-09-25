@@ -97,6 +97,20 @@ func isKiteRouterChannel(info *relaycommon.RelayInfo) bool {
 	return ok
 }
 
+// ConvertOpenAIResponsesRequest 在 Router 线上把 responses 请求转成 chat completions
+// 请求 —— 上游 Kite Router 只认 chat，直接透传 responses body 会因缺 `messages`
+// 字段被回 422 Field required。Marathon 线保持原有行为（原样透传）。
+func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
+	if !isKiteRouterChannel(info) {
+		return a.Adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+	}
+	converted, err := relayconvert.ResponsesRequestToChatCompletionsRequest(&request)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
+}
+
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info == nil {
 		return "", fmt.Errorf("relay info is nil")
