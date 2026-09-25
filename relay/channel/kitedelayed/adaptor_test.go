@@ -699,6 +699,182 @@ func TestAdaptorDoResponseConvertsToolCallToClaudeStream(t *testing.T) {
 	assert.Contains(t, body, "event: message_stop")
 }
 
+func TestKiteRouterBaseURLDetection(t *testing.T) {
+	const host = "https://delayed-inference.prod.gokite.ai"
+	cases := []struct {
+		name     string
+		baseURL  string
+		wantBase string
+		wantOK   bool
+	}{
+		{"marathon plain", host, "", false},
+		{"marathon trailing slash", host + "/", "", false},
+		{"router marker", host + routerMarker, host, true},
+		{"router marker trailing slash", host + routerMarker + "/", host, true},
+		{"router marker uppercase", host + "/KITE-ROUTER", host, true},
+		{"empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, ok := kiteRouterBaseURL(tc.baseURL)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantBase, base)
+		})
+	}
+}
+
+func TestAdaptorGetRequestURLKiteRouterUsesChatCompletions(t *testing.T) {
+	const host = "https://delayed-inference.prod.gokite.ai"
+	adaptor := &Adaptor{}
+
+	// Router 线：三种入口都打上游的 /v1/chat/completions
+	for _, mode := range []int{
+		relayconstant.RelayModeChatCompletions,
+		relayconstant.RelayModeResponses,
+	} {
+		info := testRelayInfo(host+routerMarker, false)
+		info.RelayMode = mode
+		url, err := adaptor.GetRequestURL(info)
+		require.NoError(t, err)
+		assert.Equal(t, host+routerPath, url)
+	}
+
+	// Marathon 线：行为不变
+	info := testRelayInfo(host, false)
+	url, err := adaptor.GetRequestURL(info)
+	require.NoError(t, err)
+	assert.Equal(t, host+submitPath, url)
+
+	// Marathon 线仍然拒绝非 chat 入口
+	info = testRelayInfo(host, false)
+	info.RelayMode = relayconstant.RelayModeResponses
+	_, err = adaptor.GetRequestURL(info)
+	require.Error(t, err)
+}
+
+func TestAdaptorDoRequestKiteRouterForcesNonStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	receivedPayload := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != routerPath {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := common.DecodeJson(r.Body, &payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		receivedPayload <- payload
+		writeJSONResponse(t, w, http.StatusOK, chatCompletionResult())
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo(server.URL+routerMarker, true)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	response, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{
+		"model":"gpt-5.6-luna",
+		"messages":[{"role":"user","content":"hello"}],
+		"stream":true,
+		"stream_options":{"include_usage":true}
+	}`))
+	require.NoError(t, err)
+	require.IsType(t, &http.Response{}, response)
+	defer response.(*http.Response).Body.Close()
+
+	payload := <-receivedPayload
+	assert.Equal(t, false, payload["stream"], "Kite Router 不支持流式，对上游必须强制 stream=false")
+	assert.NotContains(t, payload, "stream_options")
+	// DoRequest 返回后 IsStream 要还原，DoResponse 才能把完整结果合成 SSE
+	assert.True(t, info.IsStream)
+}
+
+func TestAdaptorDoRequestKiteRouterSurfacesUpstreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(t, w, http.StatusBadRequest, map[string]any{
+			"detail": "Kite Router Phase 1 does not support stream=true",
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo(server.URL+routerMarker, false)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"hy3","messages":[]}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support stream")
+}
+
+func TestAdaptorDoResponseKiteRouterConvertsChatToResponses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	info := testRelayInfo("https://example.com"+routerMarker, false)
+	info.RelayMode = relayconstant.RelayModeResponses
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	resultBody, err := common.Marshal(chatCompletionResult())
+	require.NoError(t, err)
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(string(resultBody))),
+	}
+
+	_, apiErr := adaptor.DoResponse(ctx, response, info)
+	require.Nil(t, apiErr)
+
+	body := recorder.Body.String()
+	t.Logf("responses body: %s", body)
+	assert.Contains(t, body, `"object":"response"`)
+	assert.Contains(t, body, "你好")
+}
+
+func TestAdaptorDoResponseKiteRouterStreamsResponsesEvents(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	info := testRelayInfo("https://example.com"+routerMarker, true)
+	info.RelayMode = relayconstant.RelayModeResponses
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	resultBody, err := common.Marshal(chatCompletionResult())
+	require.NoError(t, err)
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(string(resultBody))),
+	}
+
+	_, apiErr := adaptor.DoResponse(ctx, response, info)
+	require.Nil(t, apiErr)
+
+	body := recorder.Body.String()
+	t.Logf("responses stream body: %s", body)
+	assert.Contains(t, body, "response.output_text.delta")
+	assert.Contains(t, body, "你好")
+}
+
 func testRelayInfo(baseURL string, stream bool) *relaycommon.RelayInfo {
 	return &relaycommon.RelayInfo{
 		IsStream:    stream,

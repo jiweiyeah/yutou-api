@@ -22,6 +22,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -29,8 +30,22 @@ import (
 )
 
 const (
-	ChannelName                  = "kite_delayed"
-	submitPath                   = "/v1/delayed/chat/completions"
+	ChannelName = "kite_delayed"
+	// 上游 gokite 有两条互不相干的线，共用同一个渠道类型，靠 ChannelBaseUrl
+	// 的后缀（routerMarker）区分：
+	//   Marathon  （异步 job）: POST /v1/delayed/chat/completions
+	//   Kite Router（同步）    : POST /v1/chat/completions
+	submitPath = "/v1/delayed/chat/completions"
+	// Kite Router 线的 base_url 标记。base_url 填成
+	// `https://delayed-inference.prod.gokite.ai/kite-router` 即走 Router 线；
+	// 不带这个后缀则仍是 Marathon 线（既有渠道行为完全不变）。
+	//
+	// 用 base_url 而不是模型名来分流：kimi-k3 / deepseek-v4-pro 两条线都有，
+	// 按模型名没法表达「新渠道走 Router、老渠道继续走 Marathon」这种灰度。
+	routerMarker = "/kite-router"
+	// Kite Router 上游只提供 chat completions，三种入口（chat / responses /
+	// messages）都打到这个路径，格式转换由 relayconvert 在进出上游前后完成。
+	routerPath                   = "/v1/chat/completions"
 	maximumRequestSize           = 32 << 20
 	maximumBodySize              = 64 << 20
 	pollTimeout                  = 5 * time.Minute
@@ -65,9 +80,31 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 	a.Adaptor.Init(info)
 }
 
+// kiteRouterBaseURL 判断这个渠道是不是 Kite Router 线，并返回剥掉标记后的 base URL。
+func kiteRouterBaseURL(channelBaseURL string) (string, bool) {
+	trimmed := strings.TrimRight(strings.TrimSpace(channelBaseURL), "/")
+	if !strings.HasSuffix(strings.ToLower(trimmed), routerMarker) {
+		return "", false
+	}
+	return strings.TrimRight(trimmed[:len(trimmed)-len(routerMarker)], "/"), true
+}
+
+func isKiteRouterChannel(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	_, ok := kiteRouterBaseURL(info.ChannelBaseUrl)
+	return ok
+}
+
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info == nil {
 		return "", fmt.Errorf("relay info is nil")
+	}
+	if base, ok := kiteRouterBaseURL(info.ChannelBaseUrl); ok {
+		// Router 线上游只有 chat completions；responses / messages 入口在进来
+		// 之前已被转成 chat 请求，所以这里三种 RelayMode 都打同一个路径。
+		return base + routerPath, nil
 	}
 	if info.RelayFormat == types.RelayFormatOpenAI && info.RelayMode != relayconstant.RelayModeChatCompletions {
 		return "", fmt.Errorf("Kite Delayed only supports /v1/chat/completions")
@@ -76,6 +113,9 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	if isKiteRouterChannel(info) {
+		return a.doKiteRouterRequest(c, info, requestBody)
+	}
 	requestJSON, err := readLimited(requestBody, maximumRequestSize)
 	if err != nil {
 		return nil, types.NewErrorWithStatusCode(
@@ -342,7 +382,199 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	}
 }
 
+// doKiteRouterRequest 处理 Kite Router 线：同步请求，且上游不支持流式。
+//
+// 上游对 stream=true 直接回 400（`Kite Router Phase 1 does not support stream=true`），
+// 所以这里对上游一律按非流式发；客户端要流式时 DoResponse 会把完整结果用
+// buildChatCompletionStream 合成为 SSE —— 和 Marathon 线复用同一套合成逻辑。
+func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	requestJSON, err := readLimited(requestBody, maximumRequestSize)
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("read Kite Router request body failed: %w", err),
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	if len(requestJSON) == 0 {
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("Kite Router request body is empty"),
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+
+	clientRequestedStream := info.IsStream
+	info.IsStream = false
+	defer func() {
+		info.IsStream = clientRequestedStream
+	}()
+
+	requestJSON, err = sjson.SetBytes(requestJSON, "stream", false)
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("set Kite Router stream flag failed: %w", err),
+			types.ErrorCodeConvertRequestFailed,
+			http.StatusInternalServerError,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	requestJSON, err = sjson.DeleteBytes(requestJSON, "stream_options")
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("remove Kite Router stream options failed: %w", err),
+			types.ErrorCodeConvertRequestFailed,
+			http.StatusInternalServerError,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+
+	requestURL, err := a.GetRequestURL(info)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	info.UpstreamRequestBodySize = int64(len(requestJSON))
+	resp, err := a.doJSONRequest(c, info, c.Request.Context(), http.MethodPost, requestURL, bytes.NewReader(requestJSON))
+	if err != nil {
+		return nil, kiteRequestError("router", err, http.StatusBadGateway)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, readErr := readAndCloseResponse(resp, maximumBodySize)
+		if readErr != nil {
+			return nil, kiteRequestError("read router response", readErr, http.StatusBadGateway)
+		}
+		return nil, kiteHTTPError("router", resp.StatusCode, body)
+	}
+	return resp, nil
+}
+
+// doKiteRouterResponses 处理 Router 线的 /v1/responses 入口（Codex 等客户端）。
+//
+// 上游只提供 chat completions，所以这里把拿到的 chat 响应（或合成的 chat SSE）
+// 用 relayconvert 转成 responses 格式再输出 —— 与 gemini 渠道
+// （relay/channel/gemini/relay_responses.go）的做法一致。
+func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
+	resultBody, err := readAndCloseResponse(resp, maximumBodySize)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+	}
+
+	var chatResp dto.OpenAITextResponse
+	if err := common.Unmarshal(resultBody, &chatResp); err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+	if upstreamError := chatResp.GetOpenAIError(); upstreamError != nil && upstreamError.Type != "" {
+		return nil, types.WithOpenAIError(*upstreamError, resp.StatusCode)
+	}
+
+	if !info.IsStream {
+		convertResult, err := relayconvert.ConvertResponse(c, info, types.RelayFormatOpenAIResponses, &chatResp)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		}
+		responsesResp, ok := convertResult.Value.(*dto.OpenAIResponsesResponse)
+		if !ok {
+			return nil, types.NewOpenAIError(
+				fmt.Errorf("expected OpenAI responses response, got %T", convertResult.Value),
+				types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		}
+		responseBody, err := common.Marshal(responsesResp)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+		}
+		service.IOCopyBytesGracefully(c, resp, responseBody)
+		return chatResp.Usage, nil
+	}
+
+	// 流式：先把完整结果合成为 chat SSE，再逐 chunk 转成 responses 事件流。
+	streamBody, err := buildChatCompletionStream(resultBody)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+	state, err := relayconvert.NewResponseStreamState(
+		types.RelayFormatOpenAI,
+		types.RelayFormatOpenAIResponses,
+		relayconvert.ResponseStreamOptions{
+			ID:      helper.GetResponseID(c),
+			Model:   info.UpstreamModelName,
+			Created: common.GetTimestamp(),
+		},
+	)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+
+	helper.SetEventStreamHeaders(c)
+	sendEvents := func(results []relayconvert.ResponseResult) *types.NewAPIError {
+		for _, result := range results {
+			event, ok := result.Value.(relayconvert.ChatToResponsesStreamEvent)
+			if !ok {
+				continue
+			}
+			payload, err := common.Marshal(event.Payload)
+			if err != nil {
+				return types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+			}
+			helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: event.Type}, string(payload))
+		}
+		return nil
+	}
+
+	var usage *dto.Usage
+	for _, chunk := range parseChatCompletionStreamChunks(streamBody) {
+		results, err := relayconvert.ConvertStreamResponseChunk(c, info, state, &chunk)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+		}
+		if apiErr := sendEvents(results); apiErr != nil {
+			return nil, apiErr
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+	}
+	if usage != nil {
+		state.SetUsage(usage)
+	}
+	finalResults, err := relayconvert.FinalizeStreamResponse(c, info, state)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+	if apiErr := sendEvents(finalResults); apiErr != nil {
+		return nil, apiErr
+	}
+	return usage, nil
+}
+
+// parseChatCompletionStreamChunks 把 buildChatCompletionStream 产出的 SSE 文本
+// 还原成 chunk 序列（跳过非 data 行与 [DONE]）。
+func parseChatCompletionStreamChunks(streamBody []byte) []dto.ChatCompletionsStreamResponse {
+	chunks := make([]dto.ChatCompletionsStreamResponse, 0, 8)
+	for _, line := range strings.Split(string(streamBody), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk dto.ChatCompletionsStreamResponse
+		if err := common.UnmarshalJsonStr(payload, &chunk); err != nil {
+			continue
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
+	if isKiteRouterChannel(info) && info.RelayMode == relayconstant.RelayModeResponses {
+		return a.doKiteRouterResponses(c, resp, info)
+	}
 	if !info.IsStream {
 		usage, apiErr := a.Adaptor.DoResponse(c, resp, info)
 		return usage, kitePostSubmitError(apiErr)
