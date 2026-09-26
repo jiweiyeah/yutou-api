@@ -426,6 +426,40 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 		info.IsStream = clientRequestedStream
 	}()
 
+	// 上游 Kite Router 是同步接口、且不支持流式，所以从发出请求到拿到完整结果
+	// 这一段（长输出实测要 690 秒）对客户端是**完全静默**的 —— 会被 Cloudflare
+	// 的 ~100s 源站超时掐断并回 524。Marathon 线靠轮询循环里的心跳撑住，
+	// 这里必须补上同样的事，否则流式长输出必挂。
+	upstreamCtx := c.Request.Context()
+	if clientRequestedStream {
+		heartbeatCtx, cancel := context.WithCancel(upstreamCtx)
+		upstreamCtx = heartbeatCtx
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(pollHeartbeatInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					helper.SetEventStreamHeaders(c)
+					helper.ExtendWriteDeadline(c)
+					if err := helper.PingData(c); err != nil {
+						// 客户端已断开，连带中止上游请求
+						cancel()
+						return
+					}
+				case <-heartbeatCtx.Done():
+					return
+				}
+			}
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+	}
+
 	requestJSON, err = sjson.SetBytes(requestJSON, "stream", false)
 	if err != nil {
 		return nil, types.NewErrorWithStatusCode(
@@ -451,7 +485,7 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	info.UpstreamRequestBodySize = int64(len(requestJSON))
-	resp, err := a.doJSONRequest(c, info, c.Request.Context(), http.MethodPost, requestURL, bytes.NewReader(requestJSON))
+	resp, err := a.doJSONRequest(c, info, upstreamCtx, http.MethodPost, requestURL, bytes.NewReader(requestJSON))
 	if err != nil {
 		return nil, kiteRequestError("router", err, http.StatusBadGateway)
 	}
