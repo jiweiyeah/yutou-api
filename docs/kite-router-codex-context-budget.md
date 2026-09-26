@@ -2,8 +2,10 @@
 
 > 作用域：**仅 Kite Delayed 渠道（type 59）中走 Router 线的部分**（`base_url` 以 `/kite-router` 结尾）。  
 > 其他渠道、其他类型的请求**行为完全不变**。  
-> 状态：**①②③④ 均已实现**（见 §11）。实现过程中对上游计费公式与 Codex 压缩协议做了两处
-> **实测修正**，§1 / §4 / §6.1 已按实测更新，原文的错误假设保留在 §11.3 作为记录。
+> 状态：**①②③④ 均已实现、已部署、已通过生产验证**（见 §8 / §11）。
+> 线上 commit `04b850a87`，镜像 revision 已核对，容器 healthy。
+> 实现过程中对上游计费公式与 Codex 压缩协议做了两处 **实测修正**，
+> §1 / §4 / §6.1 已按实测更新，原文的错误假设保留在 §11.3 作为记录。
 
 
 
@@ -406,11 +408,25 @@ JSON = { "v":1, "model":"gpt-6-astra", "at":<unix>, "tokens":<摘要后估算 to
   上游账本对得上、续跑成功、退出码 0（证据见 §6.1 末）
 - ✅ 抓包确认：Codex 发的是 `POST /v1/responses` + `"type":"compaction_trigger"`（46,644 字节）
 
-**生产**
+**生产**（2026-09-26 已执行，commit `04b850a87`，镜像 revision 与容器均核对过）
 
-- 部署后打真实请求：非流式 / 流式 / v2 压缩三条路径
-- 核对日志：`request_path=/v1/responses`、`use_channel` 正确、**无 panic**
-  （参考 `responses_handler.go` 的 `*dto.Usage` 断言教训）
+验证手法：新建**临时渠道 `10871`**（type 59，只声明机队无人服务的模型名 `stealth/ox-alpha`
+→ 任何真实用户都请求不到）+ 临时令牌，验完把渠道与令牌都删干净。
+详见 skill `yutou-api-prod-channel-ops` 的「用临时渠道做零风险生产验证」。
+
+- ✅ **预算闸门**：300 KB 请求 → `HTTP 400` + 响应头
+  `X-Kite-Context-Budget: used=5.1194/4.50 model=gpt-6-astra prompt_bytes=300065 threshold_bytes=258773 threshold_tokens=64693 max_tokens=8192`
+  + `code=context_budget_exceeded` + 完整 `metadata`。
+  带 `compaction_trigger` 的 300 KB 请求同样被拒（`used=4.8104`，压缩也压不进 4.5 线 ⇒ §6.5 生效）。
+  **日志侧证据**：两条 `type=5`、`upstream_model_name` 为空 ⇒ 确实在发上游前拒掉，**零成本**。
+- ✅ **v2 压缩**：`POST /v1/responses` + `compaction_trigger` → `200 text/event-stream`，
+  `response.output_item.done` 带 compaction item，`kr1:` 可解出
+  `{"v":1,"model":"solar-pro4",...,"summary":"已 python3 /tmp/parser.py，stdout 全 PASS。"}`
+- ✅ **回传续跑**：把 compaction item 放回 input + 新提问 → 模型答「跑完了，全部通过。」
+- ✅ **日志如实**：压缩调用那行 `upstream_model_name=solar-pro4`（日志字段修复生效）
+- ✅ **无 panic**（`docker logs new-api --since 12m | grep -ci panic` = 0）
+- ✅ **未影响生产**：`10867` 全程未动、仍 `status=2`；临时渠道/令牌/abilities 行已全部清理
+- 💰 整个过程**上游花费 $0.000072**（闸门拦下的两条 300 KB 请求零成本）
 
 ## 9. 实施顺序与状态
 
