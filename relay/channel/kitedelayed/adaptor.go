@@ -100,29 +100,9 @@ func isKiteRouterChannel(info *relaycommon.RelayInfo) bool {
 // ConvertOpenAIResponsesRequest 在 Router 线上把 responses 请求转成 chat completions
 // 请求 —— 上游 Kite Router 只认 chat，直接透传 responses body 会因缺 `messages`
 // 字段被回 422 Field required。Marathon 线保持原有行为（原样透传）。
-//
-// 这里同时是预算闸门（§5.1）的挂载点：转换完成、发上游之前先判断这次请求是否
-// 注定超过上游 $5 额度上限，注定失败就直接返回可执行的明确错误。
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	if !isKiteRouterChannel(info) {
 		return a.Adaptor.ConvertOpenAIResponsesRequest(c, info, request)
-	}
-	// 上一轮压缩产生的 compaction 块要先还原成普通消息，否则会被转换层当成
-	// 未知类型 → 空内容消息，历史整段丢失。
-	if _, err := expandKiteRouterCompactionItems(&request); err != nil {
-		return nil, types.NewErrorWithStatusCode(
-			err,
-			types.ErrorCode("compaction_block_invalid"),
-			http.StatusBadRequest,
-			types.ErrOptionWithSkipRetry(),
-		)
-	}
-	// Codex 的远程压缩 v2 就是一次普通的 /v1/responses，只是 input 末尾多一条
-	// compaction_trigger。命中即改写为「调便宜模型做摘要」。
-	compactionRequested, err := stripKiteRouterCompactionTrigger(&request)
-	if err != nil {
-		return nil, types.NewErrorWithStatusCode(
-			err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 	// Codex 的 Responses Lite 把工具藏在 input 的 additional_tools 项里，先提升成
 	// chat 能表达的形状；否则转换层会把整段 tools 丢掉（详见 codex_lite.go）。
@@ -138,27 +118,9 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if len(toolSpecs) > 0 {
 		c.Set(codexLiteContextKey, toolSpecs)
 	}
-	if info.RelayMode == relayconstant.RelayModeResponsesCompact || compactionRequested {
-		// 注意不要把 *types.NewAPIError 直接当 error 返回：typed nil 会变成非 nil
-		// 接口，调用方看到的是一次「空消息」的失败。
-		compactionBody, apiErr := a.buildKiteRouterCompactionRequest(c, info, request, compactionRequested)
-		if apiErr != nil {
-			return nil, apiErr
-		}
-		return compactionBody, nil
-	}
 	converted, err := relayconvert.ResponsesRequestToChatCompletionsRequest(&request)
 	if err != nil {
 		return nil, err
-	}
-	if apiErr := a.applyKiteRouterBudgetGate(
-		c,
-		info,
-		info.UpstreamModelName,
-		kiteRouterPromptBytes(converted),
-		kiteRouterRequestedOutputTokens(converted),
-	); apiErr != nil {
-		return nil, apiErr
 	}
 	return converted, nil
 }
@@ -537,24 +499,6 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	info.UpstreamRequestBodySize = int64(len(requestJSON))
-
-	// 按估算的预检金额挑 key：池子里约 3% 的 key 已被耗尽，随机抽签会偶发 402。
-	// 拿不到可信余额时这里什么都不做（保持随机选 key 的既有行为）。
-	if budget := kiteRouterBudgetFrom(c); budget != nil {
-		key, index, pick := a.kiteRouterPickKey(c, info, budget.RequiredUSD)
-		switch pick {
-		case kiteRouterKeyPickSelected:
-			logger.LogInfo(c, fmt.Sprintf("Kite Router budget $%.4f requires a healthier key on channel %d: key index %d -> %d",
-				budget.RequiredUSD, info.ChannelId, info.ChannelMultiKeyIndex, index))
-			info.ApiKey = key
-			info.ChannelMultiKeyIndex = index
-			common.SetContextKey(c, constant.ContextKeyChannelKey, key)
-			common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
-		case kiteRouterKeyPickNoneAffordable:
-			return nil, a.kiteRouterNoAffordableKeyError(c, info, budget)
-		}
-	}
-
 	resp, err := a.doJSONRequest(c, info, upstreamCtx, http.MethodPost, requestURL, bytes.NewReader(requestJSON))
 	if err != nil {
 		return nil, kiteRequestError("router", err, http.StatusBadGateway)
@@ -563,12 +507,6 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 		body, readErr := readAndCloseResponse(resp, maximumBodySize)
 		if readErr != nil {
 			return nil, kiteRequestError("read router response", readErr, http.StatusBadGateway)
-		}
-		// 402 是上游的额度预检拒绝：记下这个 key 已不够用，并把上游的原始错误
-		// 换成可执行的人话（设计文档 §7 明确要求绝不透传）。
-		if resp.StatusCode == http.StatusPaymentRequired && kiteRouterIsInsufficientBalance(body) {
-			kiteRouterMarkKeyDrained(info.ChannelId, info.ChannelMultiKeyIndex)
-			return nil, a.kiteRouterUpstreamBalanceError(c, info, body)
 		}
 		return nil, kiteHTTPError("router", resp.StatusCode, body)
 	}
@@ -705,16 +643,8 @@ func parseChatCompletionStreamChunks(streamBody []byte) []dto.ChatCompletionsStr
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
-	if isKiteRouterChannel(info) {
-		switch info.RelayMode {
-		case relayconstant.RelayModeResponses:
-			if plan := kiteRouterCompactionPlanFrom(c); plan != nil && plan.V2 {
-				return a.doKiteRouterCompactionV2Stream(c, resp, info)
-			}
-			return a.doKiteRouterResponses(c, resp, info)
-		case relayconstant.RelayModeResponsesCompact:
-			return a.doKiteRouterCompaction(c, resp, info)
-		}
+	if isKiteRouterChannel(info) && info.RelayMode == relayconstant.RelayModeResponses {
+		return a.doKiteRouterResponses(c, resp, info)
 	}
 	if !info.IsStream {
 		usage, apiErr := a.Adaptor.DoResponse(c, resp, info)

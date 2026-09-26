@@ -203,11 +203,10 @@ func (e *NewAPIError) ToOpenAIError() OpenAIError {
 		}
 	default:
 		result = OpenAIError{
-			Message:  e.Error(),
-			Type:     string(e.errorType),
-			Param:    "",
-			Code:     e.errorCode,
-			Metadata: e.Metadata,
+			Message: e.Error(),
+			Type:    string(e.errorType),
+			Param:   "",
+			Code:    e.errorCode,
 		}
 	}
 	if e.errorCode != ErrorCodeCountTokenFailed {
@@ -468,18 +467,6 @@ func (e *NewAPIError) UpstreamBody() string {
 		return ""
 	}
 	return e.upstreamBody
-}
-
-// ErrOptionWithMetadata attaches a machine-readable metadata blob to the error.
-// It is serialized to the downstream client as error.metadata, so callers can
-// branch on structured facts (budget numbers, thresholds) instead of parsing
-// the human-readable message.
-func ErrOptionWithMetadata(metadata json.RawMessage) NewAPIErrorOptions {
-	return func(e *NewAPIError) {
-		if len(metadata) > 0 {
-			e.Metadata = metadata
-		}
-	}
 }
 
 func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
