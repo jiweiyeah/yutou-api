@@ -2,6 +2,7 @@ package kitedelayed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -212,6 +213,16 @@ func (a *Adaptor) kiteRouterCatalogFor(c *gin.Context, info *relaycommon.RelayIn
 	if !ok {
 		return kiteRouterFallbackPrices
 	}
+	proxy, apiKey := "", ""
+	if info != nil && info.ChannelMeta != nil {
+		proxy = info.ChannelSetting.Proxy
+		apiKey = info.ApiKey
+	}
+	return kiteRouterCatalogForBase(c, base, proxy, apiKey)
+}
+
+// kiteRouterCatalogForBase 是不依赖 RelayInfo 的取价入口（模型目录端点等旁路场景用）。
+func kiteRouterCatalogForBase(c *gin.Context, base, proxy, apiKey string) map[string]kiteRouterModelPrice {
 
 	kiteRouterCatalogMu.RLock()
 	cached := kiteRouterCatalogCache[base]
@@ -230,7 +241,7 @@ func (a *Adaptor) kiteRouterCatalogFor(c *gin.Context, info *relaycommon.RelayIn
 		return cached.models
 	}
 
-	models, err := a.fetchKiteRouterCatalog(c, info, base)
+	models, err := kiteRouterFetchCatalog(c, base, proxy, apiKey)
 	if err != nil {
 		logger.LogWarn(c, fmt.Sprintf("Kite Router catalog fetch failed, falling back to cached/builtin prices: %v", err))
 		if cached != nil {
@@ -245,8 +256,8 @@ func (a *Adaptor) kiteRouterCatalogFor(c *gin.Context, info *relaycommon.RelayIn
 	return models
 }
 
-func (a *Adaptor) fetchKiteRouterCatalog(c *gin.Context, info *relaycommon.RelayInfo, base string) (map[string]kiteRouterModelPrice, error) {
-	statusCode, body, err := kiteRouterUpstreamGet(c, info, base+kiteRouterCatalogPath, info.ApiKey, kiteRouterCatalogTimeout)
+func kiteRouterFetchCatalog(c *gin.Context, base, proxy, apiKey string) (map[string]kiteRouterModelPrice, error) {
+	statusCode, body, err := kiteRouterUpstreamGet(c, proxy, base+kiteRouterCatalogPath, apiKey, kiteRouterCatalogTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -292,11 +303,7 @@ func kiteRouterParsePrice(raw string) float64 {
 // kiteRouterUpstreamGet 是预算相关旁路请求（catalog / credits）专用的 GET。
 // 它刻意不走 adaptor.doJSONRequest：那条路径在 info.IsStream 为真时会提前写出
 // SSE 头并启动心跳，而预算检查发生在流式请求的正文之前，会污染客户端响应。
-func kiteRouterUpstreamGet(c *gin.Context, info *relaycommon.RelayInfo, requestURL, apiKey string, timeout time.Duration) (int, []byte, error) {
-	proxy := ""
-	if info != nil && info.ChannelMeta != nil {
-		proxy = info.ChannelSetting.Proxy
-	}
+func kiteRouterUpstreamGet(c *gin.Context, proxy, requestURL, apiKey string, timeout time.Duration) (int, []byte, error) {
 	client, err := service.GetHttpClientWithProxy(proxy)
 	if err != nil {
 		return 0, nil, err
@@ -337,7 +344,12 @@ func kiteRouterOtherSettings(info *relaycommon.RelayInfo) dto.ChannelOtherSettin
 
 // kiteRouterSafeBudgetUSD 解析生效的安全线：渠道设置优先，其次环境变量，最后默认 4.5。
 func kiteRouterSafeBudgetUSD(info *relaycommon.RelayInfo) float64 {
-	if configured := kiteRouterOtherSettings(info).KiteRouterSafeBudgetUSD; configured != nil {
+	return kiteRouterSafeBudgetUSDFor(kiteRouterOtherSettings(info))
+}
+
+// kiteRouterSafeBudgetUSDFor 是不依赖 RelayInfo 的安全线解析（模型目录端点用）。
+func kiteRouterSafeBudgetUSDFor(settings dto.ChannelOtherSettings) float64 {
+	if configured := settings.KiteRouterSafeBudgetUSD; configured != nil {
 		if *configured > 0 && *configured <= kiteRouterHardCapUSD {
 			return *configured
 		}
@@ -438,27 +450,21 @@ func kiteRouterBudgetFrom(c *gin.Context) *kiteRouterBudget {
 
 func (a *Adaptor) kiteRouterBudgetError(c *gin.Context, info *relaycommon.RelayInfo, budget *kiteRouterBudget) *types.NewAPIError {
 	thresholdBytes := budget.Price.thresholdBytes(budget.SafeUSD)
-	// 两个 token 数必须用**同一口径**换算，否则消息自相矛盾（曾出现过
-	// 「约 258773 字节（约 64693 token），当前约 292185 字节（约 12498 token）」
-	// 这种 23 字节/token 的怪数字 —— 后者来自网关对 responses 请求的 token 估算，
-	// 它只统计了部分字段，对 Codex 这类工具调用密集的请求会严重低估）。
-	// 网关的 token 估算不是本闸门的判据（判据是字节），所以这里一律用字节换算。
+	// 用户可见文案刻意保持**英文、精简、不带金额**：只说明"撞到上下文上限"和可选出路。
+	// 金额/字节/token 等内部细节全部只放在 metadata 里给程序处理。
+	// 两个 token 数必须用**同一口径**（字节/4）换算 —— 曾出现过「约 258773 字节（约 64693
+	// token），当前约 292185 字节（约 12498 token）」这种 23 字节/token 的自相矛盾，
+	// 后者来自网关对 responses 请求的 token 估算（只统计部分字段，对工具调用密集的
+	// Codex 请求严重低估）。判据是字节，换算也只用字节。
 	promptTokens := budget.PromptBytes / kiteRouterBytesPerTokenForDisplay
 
-	options := []string{"压缩上下文（Codex 在接近上限时会自行压缩，也可手动触发）"}
-	if alternative := a.kiteRouterCheapestAlternative(c, info, budget); alternative != "" {
-		options = append(options, alternative)
+	alternative := a.kiteRouterCheapestAlternative(c, info, budget)
+	if alternative == "" {
+		alternative = "a model with a larger limit"
 	}
-	options = append(options, "新开会话")
-
-	var message strings.Builder
-	fmt.Fprintf(&message,
-		"当前会话上下文约 %d 字节（约 %d token），超过模型 %s 在本渠道的上限（约 %d 字节 / %d token）。请任选其一：",
-		budget.PromptBytes, promptTokens, budget.Model,
-		thresholdBytes, thresholdBytes/kiteRouterBytesPerTokenForDisplay)
-	for index, option := range options {
-		fmt.Fprintf(&message, "%s%s；", kiteRouterOptionMarker(index), option)
-	}
+	message := fmt.Sprintf(
+		"Context limit reached for model %s: this request is ~%d bytes, above the ~%d-byte limit for this channel. Compact the conversation, switch to %s, or start a new session.",
+		budget.Model, budget.PromptBytes, thresholdBytes, alternative)
 
 	metadata, _ := common.Marshal(map[string]any{
 		"code":                 "context_budget_exceeded",
@@ -474,25 +480,12 @@ func (a *Adaptor) kiteRouterBudgetError(c *gin.Context, info *relaycommon.RelayI
 	})
 
 	return types.NewErrorWithStatusCode(
-		fmt.Errorf("%s", message.String()),
+		errors.New(message),
 		types.ErrorCode("context_budget_exceeded"),
 		http.StatusBadRequest,
 		types.ErrOptionWithSkipRetry(),
 		types.ErrOptionWithMetadata(metadata),
 	)
-}
-
-func kiteRouterOptionMarker(index int) string {
-	switch index {
-	case 0:
-		return "① "
-	case 1:
-		return "② "
-	case 2:
-		return "③ "
-	default:
-		return fmt.Sprintf("%d) ", index+1)
-	}
 }
 
 // kiteRouterCheapestAlternative 找一个「同样这份上下文、但不会超限」的更便宜模型，

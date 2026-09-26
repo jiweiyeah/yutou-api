@@ -1,6 +1,7 @@
 package kitedelayed
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -210,7 +211,11 @@ func (a *Adaptor) fetchKiteRouterBalance(c *gin.Context, info *relaycommon.Relay
 	if !ok {
 		return 0, fmt.Errorf("channel %d is not on the Kite Router line", info.ChannelId)
 	}
-	statusCode, body, err := kiteRouterUpstreamGet(c, info, base+kiteRouterCreditsPath, key, kiteRouterBalanceFetchTimeout)
+	proxy := ""
+	if info != nil && info.ChannelMeta != nil {
+		proxy = info.ChannelSetting.Proxy
+	}
+	statusCode, body, err := kiteRouterUpstreamGet(c, proxy, base+kiteRouterCreditsPath, key, kiteRouterBalanceFetchTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -257,21 +262,11 @@ func kiteRouterParseBalance(value any) (float64, error) {
 }
 
 // kiteRouterNoAffordableKeyError 在「探测到的候选 key 余额都不够」时返回。
-// 这不是上下文问题，而是池子里没有能服务本轮预检金额的账号。
+// 文案与预算错误同样保持英文精简、不带金额，细节只进 metadata。
 func (a *Adaptor) kiteRouterNoAffordableKeyError(c *gin.Context, info *relaycommon.RelayInfo, budget *kiteRouterBudget) *types.NewAPIError {
-	options := []string{"压缩上下文（Codex 在接近上限时会自行压缩，也可手动触发）"}
-	if alternative := a.kiteRouterCheapestAlternative(c, info, budget); alternative != "" {
-		options = append(options, alternative)
-	}
-	options = append(options, "稍后重试（池子里仍有余额充足的 key，重试会重新抽签）")
-
-	var message strings.Builder
-	fmt.Fprintf(&message,
-		"上游 Kite Router 预检需要 $%.4f，但连续探测的候选 key 余额都不足（该池由一次性 $5 账号组成，无法充值）。请任选其一：",
-		budget.RequiredUSD)
-	for index, option := range options {
-		fmt.Fprintf(&message, "%s%s；", kiteRouterOptionMarker(index), option)
-	}
+	message := fmt.Sprintf(
+		"Upstream Kite Router account balance is insufficient for this request (model %s). Retry to rotate the API key, compact the conversation, or switch to a cheaper model.",
+		budget.Model)
 
 	metadata, _ := common.Marshal(map[string]any{
 		"code":            "insufficient_router_balance",
@@ -283,7 +278,7 @@ func (a *Adaptor) kiteRouterNoAffordableKeyError(c *gin.Context, info *relaycomm
 	})
 
 	return types.NewErrorWithStatusCode(
-		fmt.Errorf("%s", message.String()),
+		errors.New(message),
 		types.ErrorCode("insufficient_router_balance"),
 		http.StatusBadRequest,
 		types.ErrOptionWithSkipRetry(),
@@ -330,14 +325,9 @@ func (a *Adaptor) kiteRouterUpstreamBalanceError(c *gin.Context, info *relaycomm
 			keyIndex = info.ChannelMultiKeyIndex
 		}
 	}
-	var message strings.Builder
-	fmt.Fprintf(&message,
-		"上游 Kite Router 判定该请求超出账号额度（模型 %s，预检需要 $%.4f），且当前 key 余额不足。请任选其一：",
-		modelName, float64(requiredMicrousd)/1e6)
-	options := []string{"压缩上下文（Codex 在接近上限时会自行压缩，也可手动触发）", "改用更便宜的模型", "稍后重试（重试会换一个 key）"}
-	for index, option := range options {
-		fmt.Fprintf(&message, "%s%s；", kiteRouterOptionMarker(index), option)
-	}
+	message := fmt.Sprintf(
+		"Upstream Kite Router rejected this request for insufficient account balance (model %s). Retry to rotate the API key, compact the conversation, or switch to a cheaper model.",
+		modelName)
 
 	metadata, _ := common.Marshal(map[string]any{
 		"code":            "insufficient_router_balance",
@@ -348,7 +338,7 @@ func (a *Adaptor) kiteRouterUpstreamBalanceError(c *gin.Context, info *relaycomm
 	})
 
 	return types.NewErrorWithStatusCode(
-		fmt.Errorf("%s", message.String()),
+		errors.New(message),
 		types.ErrorCode("insufficient_router_balance"),
 		http.StatusBadRequest,
 		types.ErrOptionWithSkipRetry(),

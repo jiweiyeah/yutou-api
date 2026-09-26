@@ -396,6 +396,64 @@ B 的可行性已核对：`ModelProviderInfo.model_catalog_url` 存在
 网关日志出现一条 13,037 token、输出 163 token 的摘要请求）。
 ⇒ 机制成立，缺的只是"把阈值送到客户端"。
 
+#### B 的实现与实测结论：**端点已实现，但 codex 0.157.1 拉不到它**
+
+按方案 B 实现了 `GET /v1/model_catalog`（`controller/model_catalog.go` +
+`relay/channel/kitedelayed/router_catalog.go`），响应形状逐字段镜像 Codex 自己的
+fallback 元数据（必填字段一个不少，有单测钉住），并按 §4.2 动态算出
+`auto_compact_token_limit`。实测本地点出来的内容：
+
+```json
+{"models":[{"slug":"openai/gpt-6-astra","display_name":"openai/gpt-6-astra",
+  "auto_compact_token_limit":64693,"context_window":1050000,"max_context_window":1050000,
+  "shell_type":"unified_exec","visibility":"list","truncation_policy":{"mode":"bytes","limit":10000}, ...}]}
+```
+（`64693` 正是 astra 的 258,773 字节 ÷ 4。）
+
+**但用真实 `codex exec` 0.157.1 反复实测，Codex 一次都没有请求过这个 URL**（网关侧计数 0）：
+
+| 试过的配置 | 目录请求数 |
+| --- | --- |
+| `-c model_providers.X.model_catalog_url=...`（带 `-c model=`） | 0 |
+| 同上，不传 `-c model=` | 0 |
+| 删掉 `~/.codex/models_cache.json` 后再试 | 0 |
+| 独立 `CODEX_HOME` + 完整 `config.toml`（含 `model_catalog_url`） | 0 |
+| 把 URL 指向不可达端口（验证是否真去拉） | 0 |
+
+配置键本身**确实被解析**（故意给个整数会报
+``Error loading config.toml: invalid type: integer `12345`, expected a string in `model_providers.codex-local-test.model_catalog_url` ``），
+所以不是键名写错。源码侧的闸门是 `models-manager/src/manager.rs:565` 的
+`should_refresh_models()`（`uses_codex_backend || has_command_auth || supports_api_key_discovery`），
+而 `supports_api_key_models()` 里明确有 `model_catalog_url.is_some()` 这一支
+（`model-provider/src/models_endpoint.rs:201`）—— **理论上应当放行，实测却没发请求**。
+未定位到最后一层原因（可能是 `codex exec` 这条非交互路径没走到
+`session/mod.rs:647` 的 `list_models`），**需要后续继续查或等 Codex 版本变化**。
+
+⇒ **结论：B 目前不可依赖**。端点保留（零副作用、有测试、未来可用），但**不要把它写进给用户的配置指引**。
+给用户的方案是 **A**。
+
+#### A 的推荐值（已实测生效）
+
+`~/.codex/config.toml` 顶层一行：
+
+```toml
+model_auto_compact_token_limit = 55000   # 以 openai/gpt-6-astra 为例
+```
+
+各档模型的推荐值（= §4.3 字节阈值 ÷ 4 再留 15% 余量；分档原则见 §4.2）：
+
+| 上游模型 | 安全线（字节） | 推荐值 |
+| --- | --- | --- |
+| `gpt-6-astra` | 258,773 | `55000` |
+| `claude-opus-5` | 558,506 | `118000` |
+| `gpt-5.6-sol` | 708,373 | `150000` |
+| `claude-sonnet-5` | 1,457,706 | `260000`（受 Codex 默认 context_window 272,000 限制） |
+| `gpt-5.6-luna` / `solar-pro4` | 14.9M / 33.3M | 不用设（永不触发） |
+
+实测：不传 `model_auto_compact_token_limit` 时，第二轮不会压缩（Codex 用 fallback 的
+`context_window=272000` 推出 244,800 的阈值）；传了 `1000` 后第二轮**立刻压缩**
+（日志出现 `context compacted`）。
+
 **⚠️ 一个必须知道的边界：压缩不是万能的**。Codex 的**本地**压缩用
 `build_compacted_history(Vec::new(), &user_messages, &summary)` 重建历史
 （`core/src/compact.rs:368`）——**用户消息会被整段保留**。所以：

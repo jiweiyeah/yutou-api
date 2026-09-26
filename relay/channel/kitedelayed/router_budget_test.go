@@ -295,8 +295,11 @@ func TestKiteRouterBudgetGateRejectsOversizedPrompt(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	assert.Equal(t, "context_budget_exceeded", string(apiErr.GetErrorCode()))
 	assert.Contains(t, apiErr.Error(), "258773")
-	assert.Contains(t, apiErr.Error(), "字节")
-	assert.Contains(t, apiErr.Error(), "压缩上下文", "错误信息必须给出可执行建议")
+	assert.Contains(t, apiErr.Error(), "bytes")
+	assert.Contains(t, apiErr.Error(), "Compact the conversation", "错误信息必须给出可执行建议")
+	// 用户可见文案保持英文精简、不带金额
+	assert.NotContains(t, apiErr.Error(), "$")
+	assert.NotContains(t, apiErr.Error(), "安全线")
 	assert.Contains(t, string(apiErr.Metadata), `"threshold_bytes":258773`)
 
 	assert.Equal(t, int32(0), chatCalls.Load(), "注定失败的请求绝不能发给上游")
@@ -650,7 +653,7 @@ func TestKiteRouterDoRequestMapsUpstream402(t *testing.T) {
 	require.True(t, ok, "必须是 *types.NewAPIError，got %T", err)
 	assert.Equal(t, "insufficient_router_balance", string(apiErr.GetErrorCode()))
 	assert.NotContains(t, apiErr.Error(), "insufficient Kite Router allowance", "不得原样透传上游错误")
-	assert.Contains(t, apiErr.Error(), "5.2787")
+	assert.NotContains(t, apiErr.Error(), "5.2787", "金额只进 metadata，不进用户可见文案")
 	assert.Contains(t, string(apiErr.Metadata), `"required_usd":5.278695`)
 
 	balance, cached := kiteRouterCachedBalance(info.ChannelId, info.ChannelMultiKeyIndex)
@@ -929,11 +932,9 @@ func TestKiteRouterBudgetErrorNumbersAreSelfConsistent(t *testing.T) {
 	apiErr := adaptor.kiteRouterBudgetError(ctx, nil, budget)
 	require.NotNil(t, apiErr)
 
-	// 消息里出现的一切 token 数都必须是 字节/4，否则口径不一致。
+	// 用户可见文案只报字节（英文精简），token 数一律进 metadata 且同口径（字节/4）。
 	assert.Contains(t, apiErr.Error(), "292185")
-	assert.Contains(t, apiErr.Error(), "73046") // 292185/4
 	assert.Contains(t, apiErr.Error(), "258773")
-	assert.Contains(t, apiErr.Error(), "64693") // 258773/4
 	assert.NotContains(t, apiErr.Error(), "12498", "不得再混入网关那份不可靠的 token 估算")
 
 	var meta map[string]any

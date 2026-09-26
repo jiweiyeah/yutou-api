@@ -41,6 +41,16 @@ func SetRelayRouter(router *gin.Engine) {
 		})
 	}
 
+	// Codex 模型目录：客户端把 provider 的 `model_catalog_url` 指到这里，即可拿到
+	// 按 Kite Router 字节制安全线算出的 auto_compact_token_limit（否则 Codex 用
+	// fallback 元数据要等到 25.8 万 token 才压缩，撞线时不会自动压缩）。
+	modelCatalogRouter := router.Group("/v1/model_catalog")
+	modelCatalogRouter.Use(middleware.RouteTag("relay"))
+	modelCatalogRouter.Use(middleware.TokenAuth())
+	{
+		modelCatalogRouter.GET("", controller.ModelCatalog)
+	}
+
 	geminiRouter := router.Group("/v1beta/models")
 	geminiRouter.Use(middleware.RouteTag("relay"))
 	geminiRouter.Use(middleware.TokenAuth())
