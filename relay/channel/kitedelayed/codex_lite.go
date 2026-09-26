@@ -353,9 +353,10 @@ func (c *codexLiteToolCollector) add(tool map[string]any, namespace string) {
 			Kind: codexLiteKindToolSearch,
 		}
 	}
-	// web_search / local_shell / tool_search 等 chat 表达不了的条目直接丢弃 ——
+	// web_search / local_shell 等 chat 表达不了的条目直接丢弃 ——
 	// 之前它们会被发成 {"type":"web_search","custom":{...}} 这种非法工具，上游一律忽略。
-	// 已知缺口：Codex 的 tool_search（动态加载工具）未实现，声明该工具时模型将无法搜索工具。
+	// 唯一例外是 tool_search：它在上面单独分支里被换成代理 function 工具。
+	// 仍存的缺口：hosted web_search 无法表达（模型在 chat 协议里没有联网搜索能力）。
 }
 
 // normalizeCodexLiteFunctionTool 保证 function 工具的 parameters 是合法 JSON Schema：
