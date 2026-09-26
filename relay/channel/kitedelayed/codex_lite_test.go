@@ -177,8 +177,9 @@ func TestHoistCodexLiteToolsPicksUpToolSearchOutput(t *testing.T) {
 
 	var items []map[string]any
 	require.NoError(t, common.Unmarshal(request.Input, &items))
-	require.Len(t, items, 1)
-	require.Equal(t, "message", common.Interface2String(items[0]["type"]))
+	require.Len(t, items, 2, "tool_search_output 要留作 tool 结果，只摘掉 additional_tools")
+	require.Equal(t, "function_call_output", common.Interface2String(items[0]["type"]))
+	require.Equal(t, "message", common.Interface2String(items[1]["type"]))
 }
 
 func TestHoistCodexLiteToolsNormalizesCustomToolCallHistory(t *testing.T) {
@@ -446,4 +447,141 @@ func TestCodexLiteStreamRewriterIsNoopWithoutSpecs(t *testing.T) {
 	var rewriter *codexLiteStreamRewriter
 	event := dto.ResponsesStreamResponse{Type: "response.created"}
 	require.Len(t, rewriter.rewrite(event), 1)
+}
+
+func TestHoistCodexLiteToolsDeclaresToolSearchProxy(t *testing.T) {
+	// Codex 在模型元数据声明 supports_search_tool 时，会把 MCP/插件工具延迟到
+	// tool_search 之后。不声明这个入口，模型就没法加载那些工具（静默丢能力）。
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Tools: mustRaw([]map[string]any{
+			{"type": "tool_search"},
+			{"type": "function", "name": "exec_command", "description": "run", "parameters": map[string]any{"type": "object"}},
+		}),
+	}
+
+	specs, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+	require.Equal(t, codexLiteKindToolSearch, specs[codexLiteToolSearchProxyName].Kind)
+
+	var tools []map[string]any
+	require.NoError(t, common.Unmarshal(request.Tools, &tools))
+	require.Len(t, tools, 2)
+	proxy := tools[0]
+	require.Equal(t, "function", common.Interface2String(proxy["type"]))
+	require.Equal(t, codexLiteToolSearchProxyName, common.Interface2String(proxy["name"]))
+	parameters, ok := proxy["parameters"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, parameters["required"], "query")
+}
+
+func TestHoistCodexLiteToolsNormalizesToolSearchHistory(t *testing.T) {
+	// 历史里的 tool_search_call / tool_search_output 都要归一化：
+	// 前者变成名为 tool_search 的 function 调用，后者变成 tool 结果（并提升其工具）。
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Tools: mustRaw([]map[string]any{{"type": "tool_search"}}),
+		Input: mustRaw([]map[string]any{
+			{"type": "tool_search_call", "call_id": "call_ts", "status": "completed",
+				"execution": "client", "arguments": map[string]any{"query": "gmail"}},
+			{"type": "tool_search_output", "call_id": "call_ts", "status": "completed",
+				"tools": []map[string]any{
+					{"type": "namespace", "name": "mcp__gmail", "tools": []map[string]any{
+						{"type": "function", "name": "search_emails", "description": "s", "parameters": map[string]any{"type": "object"}},
+					}},
+				}},
+		}),
+	}
+
+	specs, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+	require.Contains(t, specs, "search_emails", "被延迟的工具必须提升为顶层 tools")
+	require.Equal(t, "mcp__gmail", specs["search_emails"].Namespace)
+
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &items))
+	require.Len(t, items, 2)
+
+	call := items[0]
+	require.Equal(t, "function_call", common.Interface2String(call["type"]))
+	require.Equal(t, codexLiteToolSearchProxyName, common.Interface2String(call["name"]))
+	require.Equal(t, "call_ts", common.Interface2String(call["call_id"]))
+	require.JSONEq(t, `{"query":"gmail"}`, common.Interface2String(call["arguments"]))
+
+	output := items[1]
+	require.Equal(t, "function_call_output", common.Interface2String(output["type"]),
+		"搜索结果要留下当 tool 消息，否则 tool_search 调用没人应答")
+	require.Equal(t, "call_ts", common.Interface2String(output["call_id"]))
+}
+
+func TestApplyCodexLiteOutputRestoresToolSearchCall(t *testing.T) {
+	output := []dto.ResponsesOutput{{
+		Type:      "function_call",
+		ID:        "call_ts",
+		CallId:    "call_ts",
+		Name:      codexLiteToolSearchProxyName,
+		Arguments: mustRaw(`{"query":"gmail","limit":5}`),
+	}}
+	specs := map[string]codexLiteToolSpec{
+		codexLiteToolSearchProxyName: {Name: codexLiteToolSearchProxyName, Kind: codexLiteKindToolSearch},
+	}
+
+	applyCodexLiteOutput(output, specs)
+
+	require.Equal(t, codexLiteOutputToolSearchCall, output[0].Type)
+	require.Equal(t, "client", output[0].Execution)
+	require.Equal(t, codexLiteStatusCompleted, output[0].Status)
+	require.JSONEq(t, `{"query":"gmail","limit":5}`, string(output[0].Arguments),
+		"tool_search_call 的 arguments 必须是对象，不是字符串")
+}
+
+func TestCodexLiteToolSearchArgumentsFallsBackToQuery(t *testing.T) {
+	require.JSONEq(t, `{"query":"gmail"}`, string(codexLiteToolSearchArguments("gmail")))
+	require.JSONEq(t, `{}`, string(codexLiteToolSearchArguments("   ")))
+	require.JSONEq(t, `{"query":"a b"}`, string(codexLiteToolSearchArguments(`{"query":"a b"}`)))
+}
+
+func TestCodexLiteStreamRewriterRewritesToolSearchItem(t *testing.T) {
+	outputIndex := 0
+	rewriter := newCodexLiteStreamRewriter(map[string]codexLiteToolSpec{
+		codexLiteToolSearchProxyName: {Name: codexLiteToolSearchProxyName, Kind: codexLiteKindToolSearch},
+	})
+
+	added := rewriter.rewrite(dto.ResponsesStreamResponse{
+		Type:        codexLiteEventOutputItemAdded,
+		OutputIndex: &outputIndex,
+		ItemID:      "call_ts",
+		Item:        &dto.ResponsesOutput{Type: "function_call", ID: "call_ts", Name: codexLiteToolSearchProxyName},
+	})
+	require.Len(t, added, 1)
+	require.Equal(t, codexLiteOutputToolSearchCall, added[0].Item.Type)
+	require.Equal(t, "client", added[0].Item.Execution)
+	require.Equal(t, codexLiteStatusInProgress, added[0].Item.Status)
+	require.JSONEq(t, `{}`, string(added[0].Item.Arguments))
+
+	// tool_search 的参数 delta 仍走 function_call_arguments.*，不能像 custom 那样被吞掉
+	delta := rewriter.rewrite(dto.ResponsesStreamResponse{
+		Type:        codexLiteEventArgsDelta,
+		OutputIndex: &outputIndex,
+		ItemID:      "call_ts",
+		Delta:       `{"query":"gmail"}`,
+	})
+	require.Len(t, delta, 1)
+	require.Equal(t, codexLiteEventArgsDelta, delta[0].Type)
+
+	done := rewriter.rewrite(dto.ResponsesStreamResponse{
+		Type:        codexLiteEventOutputItemDone,
+		OutputIndex: &outputIndex,
+		ItemID:      "call_ts",
+		Item: &dto.ResponsesOutput{
+			Type:      "function_call",
+			ID:        "call_ts",
+			Name:      codexLiteToolSearchProxyName,
+			Arguments: mustRaw(`{"query":"gmail"}`),
+		},
+	})
+	require.Len(t, done, 1)
+	require.Equal(t, codexLiteOutputToolSearchCall, done[0].Item.Type)
+	require.Equal(t, codexLiteStatusCompleted, done[0].Item.Status)
+	require.JSONEq(t, `{"query":"gmail"}`, string(done[0].Item.Arguments))
 }

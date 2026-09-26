@@ -378,6 +378,9 @@ type ResponsesOutput struct {
 	// tool call. The Codex client matches calls against its namespaced tool registry,
 	// so a flattened tool call must carry it back.
 	Namespace string `json:"namespace,omitempty"`
+	// Execution marks a tool_search_call as client-executed ("client"), matching the
+	// shape Codex emits for its deferred-tool search.
+	Execution string `json:"execution,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.
