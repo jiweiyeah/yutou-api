@@ -104,6 +104,20 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	if !isKiteRouterChannel(info) {
 		return a.Adaptor.ConvertOpenAIResponsesRequest(c, info, request)
 	}
+	// Codex 的 Responses Lite 把工具藏在 input 的 additional_tools 项里，先提升成
+	// chat 能表达的形状；否则转换层会把整段 tools 丢掉（详见 codex_lite.go）。
+	customTools, err := hoistCodexLiteTools(&request)
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(
+			err,
+			types.ErrorCodeConvertRequestFailed,
+			http.StatusBadRequest,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
+	if len(customTools) > 0 {
+		c.Set(codexLiteCustomToolsContextKey, customTools)
+	}
 	converted, err := relayconvert.ResponsesRequestToChatCompletionsRequest(&request)
 	if err != nil {
 		return nil, err
@@ -529,6 +543,8 @@ func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, inf
 				fmt.Errorf("expected OpenAI responses response, got %T", convertResult.Value),
 				types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 		}
+		// Codex Lite 的 custom 工具（exec）要按 custom_tool_call 回给客户端。
+		applyCodexLiteOutput(responsesResp.Output, codexLiteCustomTools(c))
 		responseBody, err := common.Marshal(responsesResp)
 		if err != nil {
 			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
@@ -556,17 +572,22 @@ func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, inf
 	}
 
 	helper.SetEventStreamHeaders(c)
+	liteRewriter := newCodexLiteStreamRewriter(codexLiteCustomTools(c))
 	sendEvents := func(results []relayconvert.ResponseResult) *types.NewAPIError {
 		for _, result := range results {
 			event, ok := result.Value.(relayconvert.ChatToResponsesStreamEvent)
 			if !ok {
 				continue
 			}
-			payload, err := common.Marshal(event.Payload)
-			if err != nil {
-				return types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+			outboundEvent := event.Payload
+			outboundEvent.Type = event.Type
+			for _, outbound := range liteRewriter.rewrite(outboundEvent) {
+				payload, err := common.Marshal(outbound)
+				if err != nil {
+					return types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+				}
+				helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: outbound.Type}, string(payload))
 			}
-			helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: event.Type}, string(payload))
 		}
 		return nil
 	}
