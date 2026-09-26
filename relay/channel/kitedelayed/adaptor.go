@@ -106,7 +106,7 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	}
 	// Codex 的 Responses Lite 把工具藏在 input 的 additional_tools 项里，先提升成
 	// chat 能表达的形状；否则转换层会把整段 tools 丢掉（详见 codex_lite.go）。
-	customTools, err := hoistCodexLiteTools(&request)
+	toolSpecs, err := hoistCodexLiteTools(&request)
 	if err != nil {
 		return nil, types.NewErrorWithStatusCode(
 			err,
@@ -115,8 +115,8 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 			types.ErrOptionWithSkipRetry(),
 		)
 	}
-	if len(customTools) > 0 {
-		c.Set(codexLiteCustomToolsContextKey, customTools)
+	if len(toolSpecs) > 0 {
+		c.Set(codexLiteContextKey, toolSpecs)
 	}
 	converted, err := relayconvert.ResponsesRequestToChatCompletionsRequest(&request)
 	if err != nil {
@@ -544,7 +544,7 @@ func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, inf
 				types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 		}
 		// Codex Lite 的 custom 工具（exec）要按 custom_tool_call 回给客户端。
-		applyCodexLiteOutput(responsesResp.Output, codexLiteCustomTools(c))
+		applyCodexLiteOutput(responsesResp.Output, codexLiteTools(c))
 		responseBody, err := common.Marshal(responsesResp)
 		if err != nil {
 			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
@@ -572,7 +572,7 @@ func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, inf
 	}
 
 	helper.SetEventStreamHeaders(c)
-	liteRewriter := newCodexLiteStreamRewriter(codexLiteCustomTools(c))
+	liteRewriter := newCodexLiteStreamRewriter(codexLiteTools(c))
 	sendEvents := func(results []relayconvert.ResponseResult) *types.NewAPIError {
 		for _, result := range results {
 			event, ok := result.Value.(relayconvert.ChatToResponsesStreamEvent)

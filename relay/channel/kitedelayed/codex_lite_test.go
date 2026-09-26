@@ -19,72 +19,13 @@ import (
 //	collaboration: followup_task / interrupt_agent / list_agents / send_message / spawn_agent / wait_agent
 const codexLiteToolCount = 11
 
-func TestHoistCodexLiteToolsNormalizesCustomToolCallHistory(t *testing.T) {
-	// Codex 把上一轮的 exec 调用与结果原样回填。custom_tool_call_output 在
-	// relayconvert 里没有分支，不归一化就会变成空内容的普通消息，
-	// assistant 的 tool_calls 无人应答 → 上游 502。
-	execSource := `const r = await tools.exec_command({cmd: "pwd"}); text(r.output);`
-	request := loadResponsesRequest(t, "codex_lite_request.json")
-	var items []map[string]any
-	require.NoError(t, common.Unmarshal(request.Input, &items))
-	items = append(items,
-		map[string]any{
-			"type":    "custom_tool_call",
-			"call_id": "call_1",
-			"name":    "exec",
-			"input":   execSource,
-		},
-		map[string]any{
-			"type":    "custom_tool_call_output",
-			"call_id": "call_1",
-			"output":  "/tmp",
-		},
-	)
-	encoded, err := common.Marshal(items)
-	require.NoError(t, err)
-	request.Input = encoded
-
-	customTools, err := hoistCodexLiteTools(&request)
-	require.NoError(t, err)
-	require.Equal(t, map[string]bool{"exec": true}, customTools)
-
-	var rewritten []map[string]any
-	require.NoError(t, common.Unmarshal(request.Input, &rewritten))
-	require.Len(t, rewritten, 4)
-
-	callItem := rewritten[2]
-	require.Equal(t, "function_call", common.Interface2String(callItem["type"]))
-	require.Equal(t, "exec", common.Interface2String(callItem["name"]))
-	require.Equal(t, "call_1", common.Interface2String(callItem["call_id"]))
-	require.JSONEq(t,
-		`{"source":`+mustRawString(execSource)+`}`,
-		common.Interface2String(callItem["arguments"]),
-		"历史调用参数必须与降级后的 function schema 一致")
-
-	outputItem := rewritten[3]
-	require.Equal(t, "function_call_output", common.Interface2String(outputItem["type"]))
-	require.Equal(t, "call_1", common.Interface2String(outputItem["call_id"]))
-	require.Equal(t, "/tmp", common.Interface2String(outputItem["output"]))
-}
-
-func TestHoistCodexLiteToolsKeepsUnknownCustomToolCallHistory(t *testing.T) {
-	// 没有被降级的 custom 工具（不在 customTools 里）保持原样，交给转换层按 custom 处理
-	request := dto.OpenAIResponsesRequest{
-		Model: "openai/gpt-6-astra",
-		Input: mustRaw([]map[string]any{
-			{"type": "custom_tool_call", "call_id": "call_9", "name": "other_custom", "input": "x"},
-			{"type": "custom_tool_call_output", "call_id": "call_9", "output": "y"},
-		}),
+// mustRaw 把任意值编成 json.RawMessage，仅用于构造测试数据。
+func mustRaw(value any) json.RawMessage {
+	encoded, err := common.Marshal(value)
+	if err != nil {
+		panic(err)
 	}
-
-	_, err := hoistCodexLiteTools(&request)
-	require.NoError(t, err)
-
-	var items []map[string]any
-	require.NoError(t, common.Unmarshal(request.Input, &items))
-	require.Equal(t, "custom_tool_call", common.Interface2String(items[0]["type"]))
-	require.Equal(t, "function_call_output", common.Interface2String(items[1]["type"]),
-		"结果项与工具无关，一律归一化，否则会被转换层丢掉")
+	return encoded
 }
 
 func mustRawString(value string) string {
@@ -93,15 +34,6 @@ func mustRawString(value string) string {
 		panic(err)
 	}
 	return string(encoded)
-}
-
-// mustRaw 把任意值编成 json.RawMessage，仅用于构造测试数据。
-func mustRaw(value any) json.RawMessage {
-	encoded, err := common.Marshal(value)
-	if err != nil {
-		panic(err)
-	}
-	return encoded
 }
 
 func loadResponsesRequest(t *testing.T, name string) dto.OpenAIResponsesRequest {
@@ -127,25 +59,25 @@ func toolNames(t *testing.T, raw json.RawMessage) []string {
 func TestHoistCodexLiteToolsPromotesAdditionalTools(t *testing.T) {
 	request := loadResponsesRequest(t, "codex_lite_request.json")
 
-	customTools, err := hoistCodexLiteTools(&request)
+	specs, err := hoistCodexLiteTools(&request)
 	require.NoError(t, err)
-	require.Equal(t, map[string]bool{"exec": true}, customTools)
+	require.Equal(t, codexLiteToolSpec{Name: "exec", Namespace: "functions", Kind: codexLiteKindCustom}, specs["exec"])
+	require.Equal(t, codexLiteKindFunction, specs["wait"].Kind)
+	require.Equal(t, "functions", specs["wait"].Namespace)
+	require.Equal(t, "collaboration", specs["spawn_agent"].Namespace)
 
 	names := toolNames(t, request.Tools)
 	require.Len(t, names, codexLiteToolCount)
-	require.Contains(t, names, "exec")
-	require.Contains(t, names, "wait")
-	require.Contains(t, names, "request_user_input")
-	require.Contains(t, names, "request_user_input_async")
-	require.Contains(t, names, "sleep")
-	require.Contains(t, names, "spawn_agent")
+	for _, want := range []string{"exec", "wait", "request_user_input", "request_user_input_async", "sleep", "spawn_agent"} {
+		require.Contains(t, names, want)
+	}
 	require.NotContains(t, names, "functions", "namespace 必须被展平")
 	require.NotContains(t, names, "collaboration", "namespace 必须被展平")
 
 	// exec 原本是 custom + lark grammar，chat 里表达不了，必须降级成单字符串参数的 function
-	var execTool map[string]any
 	var tools []map[string]any
 	require.NoError(t, common.Unmarshal(request.Tools, &tools))
+	var execTool map[string]any
 	for _, tool := range tools {
 		if common.Interface2String(tool["name"]) == "exec" {
 			execTool = tool
@@ -159,6 +91,8 @@ func TestHoistCodexLiteToolsPromotesAdditionalTools(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, properties, codexLiteSourceParam)
 	require.Contains(t, common.Interface2String(execTool["description"]), "Run JavaScript")
+	require.Contains(t, common.Interface2String(execTool["description"]), "tools.exec_command",
+		"必须保留原描述，它是模型写 JS 的唯一依据")
 
 	// additional_tools 项必须从 input 里摘掉，否则转换层会生成空内容的 developer 消息
 	var items []map[string]any
@@ -174,9 +108,9 @@ func TestHoistCodexLiteToolsLeavesPlainRequestUntouched(t *testing.T) {
 	originalTools := string(request.Tools)
 	originalInput := string(request.Input)
 
-	customTools, err := hoistCodexLiteTools(&request)
+	specs, err := hoistCodexLiteTools(&request)
 	require.NoError(t, err)
-	require.Nil(t, customTools, "普通请求不应产生 custom 工具")
+	require.Nil(t, specs, "普通请求不应产生工具映射")
 	require.Equal(t, originalTools, string(request.Tools), "普通请求的 tools 必须原样保留")
 	require.Equal(t, originalInput, string(request.Input), "普通请求的 input 必须原样保留")
 }
@@ -194,11 +128,141 @@ func TestHoistCodexLiteToolsFlattensTopLevelNamespace(t *testing.T) {
 		}),
 	}
 
-	customTools, err := hoistCodexLiteTools(&request)
+	specs, err := hoistCodexLiteTools(&request)
 	require.NoError(t, err)
-	require.Empty(t, customTools)
-	names := toolNames(t, request.Tools)
-	require.Equal(t, []string{"exec_command", "spawn_agent"}, names)
+	require.Empty(t, specs["exec_command"].Namespace)
+	require.Equal(t, "multi_agent_v1", specs["spawn_agent"].Namespace)
+	require.Equal(t, []string{"exec_command", "spawn_agent"}, toolNames(t, request.Tools))
+}
+
+func TestHoistCodexLiteToolsNormalizesFunctionParameters(t *testing.T) {
+	// 严格的上游会因 parameters 为 null 直接 400，必须补成合法 JSON Schema
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Tools: mustRaw([]map[string]any{
+			{"type": "function", "name": "no_params", "description": "x", "parameters": nil},
+			{"type": "namespace", "name": "ns", "tools": []map[string]any{
+				{"type": "function", "name": "bad_type", "parameters": map[string]any{"type": nil}},
+			}},
+		}),
+	}
+
+	_, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+
+	var tools []map[string]any
+	require.NoError(t, common.Unmarshal(request.Tools, &tools))
+	for _, tool := range tools {
+		parameters, ok := tool["parameters"].(map[string]any)
+		require.True(t, ok, "工具 %v 的 parameters 必须是对象", tool["name"])
+		require.Equal(t, "object", common.Interface2String(parameters["type"]))
+	}
+}
+
+func TestHoistCodexLiteToolsPicksUpToolSearchOutput(t *testing.T) {
+	// tool_search_output 与 additional_tools 同形，同样携带工具声明
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Input: mustRaw([]map[string]any{
+			{"type": "tool_search_output", "call_id": "call_ts", "tools": []map[string]any{
+				{"type": "function", "name": "search_emails", "description": "s", "parameters": map[string]any{"type": "object"}},
+			}},
+			{"type": "message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "hi"}}},
+		}),
+	}
+
+	specs, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+	require.Contains(t, specs, "search_emails")
+
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &items))
+	require.Len(t, items, 1)
+	require.Equal(t, "message", common.Interface2String(items[0]["type"]))
+}
+
+func TestHoistCodexLiteToolsNormalizesCustomToolCallHistory(t *testing.T) {
+	// Codex 把上一轮的 exec 调用与结果原样回填。custom_tool_call_output 在
+	// relayconvert 里没有分支，不归一化就会变成空内容的普通消息，
+	// assistant 的 tool_calls 无人应答 → 上游 502。
+	execSource := `const r = await tools.exec_command({cmd: "pwd"}); text(r.output);`
+	request := loadResponsesRequest(t, "codex_lite_request.json")
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &items))
+	items = append(items,
+		map[string]any{
+			"type":    "custom_tool_call",
+			"call_id": "call_1",
+			"name":    "exec",
+			"input":   execSource,
+		},
+		map[string]any{
+			"type":    "custom_tool_call_output",
+			"call_id": "call_1",
+			"output":  "/tmp",
+		},
+	)
+	request.Input = mustRaw(items)
+
+	_, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+
+	var rewritten []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &rewritten))
+	require.Len(t, rewritten, 4)
+
+	callItem := rewritten[2]
+	require.Equal(t, "function_call", common.Interface2String(callItem["type"]))
+	require.Equal(t, "exec", common.Interface2String(callItem["name"]))
+	require.Equal(t, "call_1", common.Interface2String(callItem["call_id"]))
+	require.JSONEq(t,
+		`{"source":`+mustRawString(execSource)+`}`,
+		common.Interface2String(callItem["arguments"]),
+		"历史调用参数必须与降级后的 function schema 一致")
+
+	outputItem := rewritten[3]
+	require.Equal(t, "function_call_output", common.Interface2String(outputItem["type"]))
+	require.Equal(t, "call_1", common.Interface2String(outputItem["call_id"]))
+	require.Equal(t, "/tmp", common.Interface2String(outputItem["output"]))
+}
+
+func TestHoistCodexLiteToolsKeepsUnknownCustomToolCallHistory(t *testing.T) {
+	// 没有被降级的 custom 工具（不在映射里）保持原样，交给转换层按 custom 处理
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Input: mustRaw([]map[string]any{
+			{"type": "custom_tool_call", "call_id": "call_9", "name": "other_custom", "input": "x"},
+			{"type": "custom_tool_call_output", "call_id": "call_9", "output": "y"},
+		}),
+	}
+
+	_, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &items))
+	require.Equal(t, "custom_tool_call", common.Interface2String(items[0]["type"]))
+	require.Equal(t, "function_call_output", common.Interface2String(items[1]["type"]),
+		"结果项与工具无关，一律归一化，否则会被转换层丢掉")
+}
+
+func TestHoistCodexLiteToolsKeepsCustomToolOutputWhenOutputMissing(t *testing.T) {
+	request := dto.OpenAIResponsesRequest{
+		Model: "openai/gpt-6-astra",
+		Input: mustRaw([]map[string]any{
+			{"type": "custom_tool_call_output", "call_id": "call_1", "result": "fallback"},
+		}),
+	}
+
+	_, err := hoistCodexLiteTools(&request)
+	require.NoError(t, err)
+
+	var items []map[string]any
+	require.NoError(t, common.Unmarshal(request.Input, &items))
+	require.Len(t, items, 1)
+	output, ok := items[0]["output"].(map[string]any)
+	require.True(t, ok, "缺失 output 时保留整项，避免丢内容")
+	require.Equal(t, "fallback", common.Interface2String(output["result"]))
 }
 
 func TestCodexLiteSourceFromArguments(t *testing.T) {
@@ -216,7 +280,7 @@ func TestCodexLiteSourceFromArguments(t *testing.T) {
 	}
 }
 
-func TestApplyCodexLiteOutputRewritesExecToCustomToolCall(t *testing.T) {
+func TestApplyCodexLiteOutputRestoresToolCalls(t *testing.T) {
 	output := []dto.ResponsesOutput{
 		{Type: "message", Content: []dto.ResponsesOutputContent{{Type: "output_text", Text: "hi"}}},
 		{
@@ -230,19 +294,33 @@ func TestApplyCodexLiteOutputRewritesExecToCustomToolCall(t *testing.T) {
 			Type:      "function_call",
 			ID:        "call_2",
 			CallId:    "call_2",
-			Name:      "wait",
-			Arguments: mustRaw(`{"seconds":1}`),
+			Name:      "spawn_agent",
+			Arguments: mustRaw(`{"prompt":"x"}`),
+		},
+		{
+			Type:      "function_call",
+			ID:        "call_3",
+			CallId:    "call_3",
+			Name:      "unknown_tool",
+			Arguments: mustRaw(`{}`),
 		},
 	}
+	specs := map[string]codexLiteToolSpec{
+		"exec":        {Name: "exec", Namespace: "functions", Kind: codexLiteKindCustom},
+		"spawn_agent": {Name: "spawn_agent", Namespace: "collaboration", Kind: codexLiteKindFunction},
+	}
 
-	applyCodexLiteOutput(output, map[string]bool{"exec": true})
+	applyCodexLiteOutput(output, specs)
 
 	require.Equal(t, "message", output[0].Type)
 	require.Equal(t, codexLiteOutputCustomCall, output[1].Type)
 	require.JSONEq(t, `"console.log(1);"`, string(output[1].Input))
 	require.Nil(t, output[1].Arguments)
-	require.Equal(t, "function_call", output[2].Type, "非 custom 工具保持 function_call")
-	require.JSONEq(t, `{"seconds":1}`, output[2].ArgumentsString())
+	require.Empty(t, output[1].Namespace, "custom 工具项不带 namespace（与 cc-switch 一致）")
+	require.Equal(t, "function_call", output[2].Type, "function 工具保持 function_call")
+	require.Equal(t, "collaboration", output[2].Namespace, "必须补回 namespace，客户端按命名空间匹配")
+	require.Equal(t, "function_call", output[3].Type)
+	require.Empty(t, output[3].Namespace, "未展平的未知工具不应被改动")
 }
 
 func TestCodexLiteStreamRewriterRewritesExecEvents(t *testing.T) {
@@ -250,7 +328,9 @@ func TestCodexLiteStreamRewriterRewritesExecEvents(t *testing.T) {
 	itemID := "call_1"
 	execArguments := `{"source":"console.log('hi');"}`
 
-	rewriter := newCodexLiteStreamRewriter(map[string]bool{"exec": true})
+	rewriter := newCodexLiteStreamRewriter(map[string]codexLiteToolSpec{
+		"exec": {Name: "exec", Namespace: "functions", Kind: codexLiteKindCustom},
+	})
 
 	var emitted []dto.ResponsesStreamResponse
 	feed := func(event dto.ResponsesStreamResponse) {
@@ -316,30 +396,52 @@ func TestCodexLiteStreamRewriterRewritesExecEvents(t *testing.T) {
 	require.Equal(t, codexLiteOutputCustomCall, emitted[1].Item.Type)
 	require.Nil(t, emitted[1].Item.Arguments)
 	require.Equal(t, "console.log('hi');", emitted[2].Delta)
+	require.Equal(t, "console.log('hi');", emitted[3].Input, ".done 事件必须带最终 input")
 	require.Equal(t, codexLiteOutputCustomCall, emitted[4].Item.Type)
 	require.JSONEq(t, `"console.log('hi');"`, string(emitted[4].Item.Input))
 	require.Equal(t, codexLiteOutputCustomCall, emitted[5].Response.Output[0].Type)
 	require.JSONEq(t, `"console.log('hi');"`, string(emitted[5].Response.Output[0].Input))
 }
 
+func TestCodexLiteStreamRewriterRestoresNamespaceOnFunctionItems(t *testing.T) {
+	outputIndex := 0
+	rewriter := newCodexLiteStreamRewriter(map[string]codexLiteToolSpec{
+		"spawn_agent": {Name: "spawn_agent", Namespace: "collaboration", Kind: codexLiteKindFunction},
+	})
+
+	rewritten := rewriter.rewrite(dto.ResponsesStreamResponse{
+		Type:        codexLiteEventOutputItemAdded,
+		OutputIndex: &outputIndex,
+		ItemID:      "call_2",
+		Item:        &dto.ResponsesOutput{Type: "function_call", ID: "call_2", Name: "spawn_agent"},
+	})
+
+	require.Len(t, rewritten, 1)
+	require.Equal(t, "function_call", rewritten[0].Item.Type)
+	require.Equal(t, "collaboration", rewritten[0].Item.Namespace)
+}
+
 func TestCodexLiteStreamRewriterPassesThroughOtherTools(t *testing.T) {
 	outputIndex := 0
-	rewriter := newCodexLiteStreamRewriter(map[string]bool{"exec": true})
+	rewriter := newCodexLiteStreamRewriter(map[string]codexLiteToolSpec{
+		"exec": {Name: "exec", Namespace: "functions", Kind: codexLiteKindCustom},
+	})
 	event := dto.ResponsesStreamResponse{
 		Type:        codexLiteEventOutputItemAdded,
 		OutputIndex: &outputIndex,
 		ItemID:      "call_2",
-		Item:        &dto.ResponsesOutput{Type: "function_call", ID: "call_2", Name: "wait"},
+		Item:        &dto.ResponsesOutput{Type: "function_call", ID: "call_2", Name: "unknown_tool"},
 	}
 
 	rewritten := rewriter.rewrite(event)
 	require.Len(t, rewritten, 1)
-	require.Equal(t, "function_call", rewritten[0].Item.Type, "非 custom 工具不应被改写")
+	require.Equal(t, "function_call", rewritten[0].Item.Type, "未展平的工具不应被改写")
+	require.Empty(t, rewritten[0].Item.Namespace)
 }
 
-func TestCodexLiteStreamRewriterIsNoopWithoutCustomTools(t *testing.T) {
+func TestCodexLiteStreamRewriterIsNoopWithoutSpecs(t *testing.T) {
 	require.Nil(t, newCodexLiteStreamRewriter(nil))
-	require.Nil(t, newCodexLiteStreamRewriter(map[string]bool{}))
+	require.Nil(t, newCodexLiteStreamRewriter(map[string]codexLiteToolSpec{}))
 
 	var rewriter *codexLiteStreamRewriter
 	event := dto.ResponsesStreamResponse{Type: "response.created"}

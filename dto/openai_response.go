@@ -374,6 +374,10 @@ type ResponsesOutput struct {
 	// Input carries the raw text payload of a custom tool call
 	// (`{"type":"custom_tool_call"}`), which takes freeform source instead of JSON arguments.
 	Input json.RawMessage `json:"input,omitempty"`
+	// Namespace is the Codex private Responses extension that qualifies a namespaced
+	// tool call. The Codex client matches calls against its namespaced tool registry,
+	// so a flattened tool call must carry it back.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.
@@ -427,6 +431,8 @@ type ResponsesStreamResponse struct {
 	SummaryIndex *int                           `json:"summary_index,omitempty"`
 	ItemID       string                         `json:"item_id,omitempty"`
 	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
+	// Input is the final raw text of a `response.custom_tool_call_input.done` event.
+	Input string `json:"input,omitempty"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构

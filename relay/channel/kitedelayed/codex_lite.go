@@ -20,28 +20,37 @@ import (
 // 上游 Kite Router 只提供 chat completions，必须做 responses -> chat 转换，而转换层
 // 只认顶层 tools、且只会产出 function_call，于是：
 //  1. additional_tools 项落到默认分支被当成一条空内容的 developer 消息，工具整段丢失；
-//  2. custom 类型工具在 chat 协议里无法表达。
+//  2. custom 类型工具在 chat 协议里无法表达；
+//  3. custom_tool_call_output 输入项没有分支，被降级成空内容的普通消息，
+//     assistant 的 tool_calls 无人应答，上游直接回 502。
 //
 // 结果就是模型手里零工具，表现为「能聊天、但拒绝执行任何操作」。
 //
 // 这里补一层桥，**只在 Kite Router 线生效**（其他渠道走原生逻辑，完全不受影响）：
-//   - 请求侧：把 additional_tools 提升为顶层 tools、展平 namespace、把 custom 工具
-//     降级成单字符串参数的 function 工具（参数名 source，承载原始源码）；
+//   - 请求侧：把 additional_tools / tool_search_output 里的工具提升为顶层 tools、
+//     展平 namespace、把 custom 工具降级成单字符串参数的 function 工具（参数名 source，
+//     承载原始源码），并把历史里的 custom_tool_call / custom_tool_call_output
+//     归一化成 chat 认得的形态；
 //   - 响应侧：把 exec 的 function_call 还原成 Codex 期望的 custom_tool_call
-//     （input 为源码原文）。
+//     （input 为源码原文），并给展平过的工具调用补回 namespace 字段。
+//
+// 设计对照过 farion1231/cc-switch 的 transform_codex_chat.rs / streaming_codex_chat.rs
+// （同为 Responses->Chat 桥接，5400+ 行、带完整测试）。一致的部分：custom 工具降级成
+// 单字段 function、响应侧按同一字段还原、custom_tool_call_output 必须转成 tool 消息、
+// 流式下抑制 function_call_arguments.* 改为一次性 custom_tool_call_input.delta/done。
+// 有意保留的差异见 codexLiteToolCollector.add 的注释。
 //
 // 没有 additional_tools 的普通请求会在 hoistCodexLiteTools 里原样返回，零改动。
 const (
-	codexLiteCustomToolsContextKey = "kite_codex_lite_custom_tools"
+	codexLiteContextKey = "kite_codex_lite_tools"
 
 	codexLiteTypeAdditionalTools = "additional_tools"
+	codexLiteTypeToolSearchOut   = "tool_search_output"
 	codexLiteTypeNamespace       = "namespace"
 	codexLiteTypeCustom          = "custom"
 	codexLiteTypeFunction        = "function"
 
-	// Codex 回填历史时的输入项类型。custom_tool_call_output 在 relayconvert 里
-	// 没有对应分支，会被当成空内容的普通消息丢掉，导致 assistant 的 tool_calls
-	// 没有应答，上游直接回 502 —— 这里归一化成 chat 侧认得的形态。
+	// Codex 回填历史时的输入项类型。
 	codexLiteInputCustomToolCall   = "custom_tool_call"
 	codexLiteInputCustomToolOutput = "custom_tool_call_output"
 	codexLiteInputFunctionCall     = "function_call"
@@ -61,15 +70,42 @@ const (
 	codexLiteOutputCustomCall   = "custom_tool_call"
 )
 
+// codexLiteToolKind 区分降级后的 chat 工具原本是什么形态，响应侧据此还原。
+type codexLiteToolKind int
+
+const (
+	codexLiteKindFunction codexLiteToolKind = iota
+	codexLiteKindCustom
+)
+
+// codexLiteToolSpec 记录一个 chat 工具对应的原始 Codex 工具。
+// chat 名沿用工具的裸名（见 codexLiteToolCollector.add 的说明），
+// Namespace 用于在响应里还原 Codex 私有扩展的 namespace 字段。
+type codexLiteToolSpec struct {
+	Name      string
+	Namespace string
+	Kind      codexLiteToolKind
+}
+
+// codexLiteToolCollector 边展平边记录 chat 名到原始工具的映射。
+type codexLiteToolCollector struct {
+	chatTools []map[string]any
+	specs     map[string]codexLiteToolSpec
+}
+
+func newCodexLiteToolCollector() *codexLiteToolCollector {
+	return &codexLiteToolCollector{specs: make(map[string]codexLiteToolSpec)}
+}
+
 // hoistCodexLiteTools 把 Responses Lite 的 additional_tools 项提升为顶层 tools，
-// 归一化历史里的 custom_tool_call/output 项，并返回「需要按 custom_tool_call
-// 回给客户端」的工具名集合。返回空集合表示这不是一个 Lite 请求，调用方保持原行为。
-func hoistCodexLiteTools(req *dto.OpenAIResponsesRequest) (map[string]bool, error) {
+// 归一化历史里的 custom_tool_call/output 项，并返回 chat 名到原始工具的映射。
+// 返回空 map 表示这不是一个 Lite 请求，调用方保持原行为。
+func hoistCodexLiteTools(req *dto.OpenAIResponsesRequest) (map[string]codexLiteToolSpec, error) {
 	if req == nil {
 		return nil, nil
 	}
 
-	items, hoisted, removedAdditionalTools, err := splitCodexLiteInput(req.Input)
+	items, hoisted, removedDeclaredTools, err := splitCodexLiteInput(req.Input)
 	if err != nil {
 		return nil, err
 	}
@@ -79,35 +115,37 @@ func hoistCodexLiteTools(req *dto.OpenAIResponsesRequest) (map[string]bool, erro
 		return nil, err
 	}
 
-	hasCustomToolCall := containsCodexLiteInputType(items, codexLiteInputCustomToolCall)
-	if len(hoisted) == 0 && !containsCodexLiteNamespace(existing) && !hasCustomToolCall {
+	// custom_tool_call_output 单独出现时同样要归一化（否则会被转换层丢掉），
+	// 所以两个类型都算「需要重写 input」。
+	needsInputRewrite := containsCodexLiteInputType(items, codexLiteInputCustomToolCall) ||
+		containsCodexLiteInputType(items, codexLiteInputCustomToolOutput)
+	if len(hoisted) == 0 && !containsCodexLiteNamespace(existing) && !needsInputRewrite {
 		return nil, nil
 	}
 
-	customTools := make(map[string]bool)
-	merged := make([]map[string]any, 0, len(existing)+len(hoisted))
-	merged = append(merged, flattenCodexLiteTools(existing, customTools)...)
-	merged = append(merged, flattenCodexLiteTools(hoisted, customTools)...)
-	if len(merged) > 0 {
-		encoded, err := common.Marshal(merged)
+	collector := newCodexLiteToolCollector()
+	collector.addAll(existing, "")
+	collector.addAll(hoisted, "")
+	if len(collector.chatTools) > 0 {
+		encoded, err := common.Marshal(collector.chatTools)
 		if err != nil {
 			return nil, fmt.Errorf("encode responses tools failed: %w", err)
 		}
 		req.Tools = encoded
 	}
 
-	if removedAdditionalTools || hasCustomToolCall {
-		encoded, err := common.Marshal(rewriteCodexLiteInputItems(items, customTools))
+	if removedDeclaredTools || needsInputRewrite {
+		encoded, err := common.Marshal(rewriteCodexLiteInputItems(items, collector.specs))
 		if err != nil {
 			return nil, fmt.Errorf("encode responses input failed: %w", err)
 		}
 		req.Input = encoded
 	}
-	return customTools, nil
+	return collector.specs, nil
 }
 
-// splitCodexLiteInput 摘出 input 里 additional_tools 项携带的工具并移除这些项，
-// 返回剩余输入项与「是否真的移除过」。
+// splitCodexLiteInput 摘出 input 里携带工具声明的项（additional_tools /
+// tool_search_output）并移除这些项，返回剩余输入项与「是否真的移除过」。
 func splitCodexLiteInput(raw json.RawMessage) ([]map[string]any, []map[string]any, bool, error) {
 	if len(raw) == 0 || common.GetJsonType(raw) != "array" {
 		return nil, nil, false, nil
@@ -121,7 +159,8 @@ func splitCodexLiteInput(raw json.RawMessage) ([]map[string]any, []map[string]an
 	kept := make([]map[string]any, 0, len(items))
 	removed := false
 	for _, item := range items {
-		if strings.TrimSpace(common.Interface2String(item["type"])) != codexLiteTypeAdditionalTools {
+		itemType := strings.TrimSpace(common.Interface2String(item["type"]))
+		if itemType != codexLiteTypeAdditionalTools && itemType != codexLiteTypeToolSearchOut {
 			kept = append(kept, item)
 			continue
 		}
@@ -144,27 +183,33 @@ func splitCodexLiteInput(raw json.RawMessage) ([]map[string]any, []map[string]an
 //     {"source": "<原始源码>"}，与降级后的工具 schema 一致；
 //   - custom_tool_call_output → function_call_output，否则转换层会把它当普通消息丢掉，
 //     assistant 的 tool_calls 就没人应答，上游会直接 502。
-func rewriteCodexLiteInputItems(items []map[string]any, customTools map[string]bool) []map[string]any {
+func rewriteCodexLiteInputItems(items []map[string]any, specs map[string]codexLiteToolSpec) []map[string]any {
 	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		switch strings.TrimSpace(common.Interface2String(item["type"])) {
 		case codexLiteInputCustomToolCall:
 			name := strings.TrimSpace(common.Interface2String(item["name"]))
-			if !customTools[name] {
+			spec, ok := lookupCodexLiteSpec(specs, name, common.Interface2String(item["namespace"]))
+			if !ok || spec.Kind != codexLiteKindCustom {
 				out = append(out, item)
 				continue
 			}
 			out = append(out, map[string]any{
 				"type":      codexLiteInputFunctionCall,
-				"name":      name,
+				"name":      spec.Name,
 				"call_id":   common.Interface2String(item["call_id"]),
 				"arguments": codexLiteArgumentsFromSource(common.Interface2String(item["input"])),
 			})
 		case codexLiteInputCustomToolOutput:
+			// 结果项与工具形态无关，一律归一化；缺失 output 时保留整项，避免丢内容。
+			output := item["output"]
+			if output == nil {
+				output = item
+			}
 			out = append(out, map[string]any{
 				"type":    codexLiteInputFunctionOutput,
 				"call_id": common.Interface2String(item["call_id"]),
-				"output":  item["output"],
+				"output":  output,
 			})
 		default:
 			out = append(out, item)
@@ -211,38 +256,77 @@ func containsCodexLiteNamespace(tools []map[string]any) bool {
 	return false
 }
 
-// flattenCodexLiteTools 把 namespace 摊平成其内部的工具，并把 chat 协议表达不了的
-// custom 工具降级为 function 工具。web_search / local_shell 之类在 chat 里没有对应
-// 形态的条目直接丢弃 —— 之前它们会被发成 {"type":"web_search","custom":{...}} 这种
-// 非法工具，上游一律忽略，丢掉语义等价但更干净。
-func flattenCodexLiteTools(tools []map[string]any, customTools map[string]bool) []map[string]any {
-	out := make([]map[string]any, 0, len(tools))
+func (c *codexLiteToolCollector) addAll(tools []map[string]any, namespace string) {
 	for _, tool := range tools {
-		switch strings.TrimSpace(common.Interface2String(tool["type"])) {
-		case codexLiteTypeNamespace:
-			nested, ok := tool["tools"].([]any)
-			if !ok {
-				continue
-			}
-			children := make([]map[string]any, 0, len(nested))
-			for _, raw := range nested {
-				if child, ok := raw.(map[string]any); ok {
-					children = append(children, child)
-				}
-			}
-			out = append(out, flattenCodexLiteTools(children, customTools)...)
-		case codexLiteTypeFunction:
-			out = append(out, tool)
-		case codexLiteTypeCustom:
-			name := strings.TrimSpace(common.Interface2String(tool["name"]))
-			if name == "" {
-				continue
-			}
-			customTools[name] = true
-			out = append(out, codexLiteCustomToolToFunction(tool, name))
-		}
+		c.add(tool, namespace)
 	}
-	return out
+}
+
+// add 把一个 Codex 工具转成 chat 能表达的形态。
+//
+// namespace 展平后**沿用工具的裸名**，而不是 cc-switch 的 `<namespace>__<name>`：
+// 实测 Codex 客户端按裸名也能匹配到工具（Lite 的 exec 走通全闭环），保持裸名可以不改变
+// 模型看到的工具名，且当前 Codex 工具集内不存在同名冲突。namespace 会在响应侧通过
+// codexLiteToolSpec.Namespace 补回，供客户端按命名空间匹配。
+// 若将来出现同名冲突，改成 <namespace>__<name> 即可（响应侧需同步改回裸名）。
+func (c *codexLiteToolCollector) add(tool map[string]any, namespace string) {
+	switch strings.TrimSpace(common.Interface2String(tool["type"])) {
+	case codexLiteTypeNamespace:
+		nested, ok := tool["tools"].([]any)
+		if !ok {
+			return
+		}
+		childNamespace := strings.TrimSpace(common.Interface2String(tool["name"]))
+		children := make([]map[string]any, 0, len(nested))
+		for _, raw := range nested {
+			if child, ok := raw.(map[string]any); ok {
+				children = append(children, child)
+			}
+		}
+		c.addAll(children, childNamespace)
+	case codexLiteTypeFunction:
+		name := strings.TrimSpace(common.Interface2String(tool["name"]))
+		if name == "" {
+			return
+		}
+		c.chatTools = append(c.chatTools, normalizeCodexLiteFunctionTool(tool, name))
+		c.specs[name] = codexLiteToolSpec{Name: name, Namespace: namespace, Kind: codexLiteKindFunction}
+	case codexLiteTypeCustom:
+		name := strings.TrimSpace(common.Interface2String(tool["name"]))
+		if name == "" {
+			return
+		}
+		c.chatTools = append(c.chatTools, codexLiteCustomToolToFunction(tool, name))
+		c.specs[name] = codexLiteToolSpec{Name: name, Namespace: namespace, Kind: codexLiteKindCustom}
+	}
+	// web_search / local_shell / tool_search 等 chat 表达不了的条目直接丢弃 ——
+	// 之前它们会被发成 {"type":"web_search","custom":{...}} 这种非法工具，上游一律忽略。
+	// 已知缺口：Codex 的 tool_search（动态加载工具）未实现，声明该工具时模型将无法搜索工具。
+}
+
+// normalizeCodexLiteFunctionTool 保证 function 工具的 parameters 是合法 JSON Schema：
+// 严格的上游会因 parameters 为 null 直接 400（"expected object, received null"）。
+func normalizeCodexLiteFunctionTool(tool map[string]any, name string) map[string]any {
+	normalized := map[string]any{
+		"type":       codexLiteTypeFunction,
+		"name":       name,
+		"parameters": normalizeCodexLiteParameters(tool["parameters"]),
+	}
+	if description, ok := tool["description"].(string); ok && strings.TrimSpace(description) != "" {
+		normalized["description"] = description
+	}
+	return normalized
+}
+
+func normalizeCodexLiteParameters(parameters any) map[string]any {
+	normalized, ok := parameters.(map[string]any)
+	if !ok {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	if common.Interface2String(normalized["type"]) != "object" {
+		normalized["type"] = "object"
+	}
+	return normalized
 }
 
 // codexLiteExecGuidance 会被前置到降级后的 custom 工具描述里。
@@ -257,6 +341,7 @@ const codexLiteExecGuidance = "IMPORTANT: this tool takes raw source text, not J
 // codexLiteCustomToolToFunction 把 custom(grammar) 工具降级成 function 工具：
 // 上游只会回 JSON 参数，所以用单个字符串字段承载原始源码，
 // 响应侧再由 codexLiteSourceFromArguments 还原回 custom_tool_call 的 input。
+// 原始工具定义（含全部嵌套工具的 TS 声明）必须原样保留 —— 它是模型写 JS 的唯一依据。
 func codexLiteCustomToolToFunction(tool map[string]any, name string) map[string]any {
 	description := common.Interface2String(tool["description"])
 	if strings.TrimSpace(description) == "" {
@@ -305,41 +390,68 @@ func codexLiteSourceFromArguments(arguments string) string {
 	return trimmed
 }
 
-// applyCodexLiteOutput 把非流式响应里 exec 这类 custom 工具的 function_call 项
-// 还原成 custom_tool_call（input 为源码原文，arguments 清空）。
-func applyCodexLiteOutput(output []dto.ResponsesOutput, customTools map[string]bool) {
-	if len(customTools) == 0 {
+func lookupCodexLiteSpec(specs map[string]codexLiteToolSpec, name, namespace string) (codexLiteToolSpec, bool) {
+	if len(specs) == 0 {
+		return codexLiteToolSpec{}, false
+	}
+	if namespace = strings.TrimSpace(namespace); namespace != "" {
+		if spec, ok := specs[namespace+"__"+name]; ok {
+			return spec, true
+		}
+	}
+	spec, ok := specs[strings.TrimSpace(name)]
+	return spec, ok
+}
+
+// applyCodexLiteOutput 把非流式响应里的工具调用还原成 Codex 期望的形态：
+// custom 工具 → custom_tool_call（input 为源码原文、arguments 清空）；
+// 展平过的 function 工具 → 补回 namespace 字段，供客户端按命名空间匹配。
+func applyCodexLiteOutput(output []dto.ResponsesOutput, specs map[string]codexLiteToolSpec) {
+	if len(specs) == 0 {
 		return
 	}
 	for i := range output {
-		item := &output[i]
-		if item.Type != codexLiteOutputFunctionCall || !customTools[item.Name] {
-			continue
-		}
-		source := codexLiteSourceFromArguments(item.ArgumentsString())
-		item.Type = codexLiteOutputCustomCall
-		item.Arguments = nil
-		if encoded, err := common.Marshal(source); err == nil {
-			item.Input = encoded
-		}
+		restoreCodexLiteToolItem(&output[i], specs)
+	}
+}
+
+func restoreCodexLiteToolItem(item *dto.ResponsesOutput, specs map[string]codexLiteToolSpec) {
+	if item == nil || item.Type != codexLiteOutputFunctionCall {
+		return
+	}
+	spec, ok := lookupCodexLiteSpec(specs, item.Name, "")
+	if !ok {
+		return
+	}
+	if spec.Kind != codexLiteKindCustom {
+		item.Namespace = spec.Namespace
+		return
+	}
+	source := codexLiteSourceFromArguments(item.ArgumentsString())
+	item.Type = codexLiteOutputCustomCall
+	item.Arguments = nil
+	if encoded, err := common.Marshal(source); err == nil {
+		item.Input = encoded
 	}
 }
 
 // codexLiteStreamRewriter 把流式事件里 custom 工具的 function_call 改写成
 // custom_tool_call：added/done 换 item 类型，参数 delta 攒起来在 done 时
 // 一次性以源码原文发给客户端（JSON 参数被逐字符切碎后无法直接还原成源码）。
+// 与 cc-switch 的 streaming_codex_chat.rs 一致：custom 工具不再发
+// function_call_arguments.*，改为 custom_tool_call_input.delta / .done。
 type codexLiteStreamRewriter struct {
-	customTools  map[string]bool
+	specs        map[string]codexLiteToolSpec
 	customItems  map[string]bool
 	pendingDelta map[string]string
 }
 
-func newCodexLiteStreamRewriter(customTools map[string]bool) *codexLiteStreamRewriter {
-	if len(customTools) == 0 {
+func newCodexLiteStreamRewriter(specs map[string]codexLiteToolSpec) *codexLiteStreamRewriter {
+	if len(specs) == 0 {
 		return nil
 	}
 	return &codexLiteStreamRewriter{
-		customTools:  customTools,
+		specs:        specs,
 		customItems:  make(map[string]bool),
 		pendingDelta: make(map[string]string),
 	}
@@ -352,7 +464,12 @@ func (r *codexLiteStreamRewriter) rewrite(event dto.ResponsesStreamResponse) []d
 
 	switch event.Type {
 	case codexLiteEventOutputItemAdded, codexLiteEventOutputItemDone:
-		if !r.isCustomItem(event.Item) {
+		if !r.isCodexLiteToolItem(event.Item) {
+			return []dto.ResponsesStreamResponse{event}
+		}
+		spec, _ := lookupCodexLiteSpec(r.specs, event.Item.Name, "")
+		if spec.Kind != codexLiteKindCustom {
+			event.Item.Namespace = spec.Namespace
 			return []dto.ResponsesStreamResponse{event}
 		}
 		itemID := codexLiteItemID(event.Item)
@@ -369,10 +486,10 @@ func (r *codexLiteStreamRewriter) rewrite(event dto.ResponsesStreamResponse) []d
 		return []dto.ResponsesStreamResponse{event}
 
 	case codexLiteEventArgsDelta:
-		if !r.customItems[codexLiteEventItemID(event)] {
+		itemID := codexLiteEventItemID(event)
+		if !r.customItems[itemID] {
 			return []dto.ResponsesStreamResponse{event}
 		}
-		itemID := codexLiteEventItemID(event)
 		r.pendingDelta[itemID] += event.Delta
 		return nil
 
@@ -391,11 +508,13 @@ func (r *codexLiteStreamRewriter) rewrite(event dto.ResponsesStreamResponse) []d
 		done := event
 		done.Type = codexLiteEventInputDone
 		done.Delta = ""
+		// .done 事件按官方形态带最终 input，客户端两种累加方式都能取到内容。
+		done.Input = source
 		return []dto.ResponsesStreamResponse{delta, done}
 
 	case codexLiteEventCompleted:
 		if event.Response != nil {
-			applyCodexLiteOutput(event.Response.Output, r.customTools)
+			applyCodexLiteOutput(event.Response.Output, r.specs)
 		}
 		return []dto.ResponsesStreamResponse{event}
 	}
@@ -403,11 +522,12 @@ func (r *codexLiteStreamRewriter) rewrite(event dto.ResponsesStreamResponse) []d
 	return []dto.ResponsesStreamResponse{event}
 }
 
-func (r *codexLiteStreamRewriter) isCustomItem(item *dto.ResponsesOutput) bool {
+func (r *codexLiteStreamRewriter) isCodexLiteToolItem(item *dto.ResponsesOutput) bool {
 	if item == nil || item.Type != codexLiteOutputFunctionCall {
 		return false
 	}
-	return r.customTools[item.Name]
+	_, ok := lookupCodexLiteSpec(r.specs, item.Name, "")
+	return ok
 }
 
 func (r *codexLiteStreamRewriter) takePendingDelta(itemID string) string {
@@ -433,15 +553,15 @@ func codexLiteEventItemID(event dto.ResponsesStreamResponse) string {
 	return strings.TrimSpace(event.ItemID)
 }
 
-// codexLiteCustomTools 取出请求侧存下的 custom 工具名集合。
-func codexLiteCustomTools(c *gin.Context) map[string]bool {
+// codexLiteTools 取出请求侧存下的 chat 名 → 原始工具映射。
+func codexLiteTools(c *gin.Context) map[string]codexLiteToolSpec {
 	if c == nil {
 		return nil
 	}
-	value, exists := c.Get(codexLiteCustomToolsContextKey)
+	value, exists := c.Get(codexLiteContextKey)
 	if !exists {
 		return nil
 	}
-	customTools, _ := value.(map[string]bool)
-	return customTools
+	specs, _ := value.(map[string]codexLiteToolSpec)
+	return specs
 }
