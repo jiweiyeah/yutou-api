@@ -54,6 +54,12 @@ type ChannelOtherSettings struct {
 	UpstreamModelUpdateLastRemovedModels  []string              `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
 	UpstreamModelUpdateIgnoredModels      []string              `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
 	AdvancedCustom                        *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
+	// KiteRouterSafeBudgetUSD 覆盖 Kite Router 线（base_url 以 /kite-router 结尾）的
+	// 请求前额度安全线，单位美元，默认 4.50。仅影响该线的预算闸门与选 key。
+	KiteRouterSafeBudgetUSD *float64 `json:"kite_router_safe_budget_usd,omitempty"`
+	// KiteRouterBalanceFilter 控制 Kite Router 线是否在选 key 时按缓存余额过滤候选。
+	// 为 nil 时按默认开启处理。
+	KiteRouterBalanceFilter *bool `json:"kite_router_balance_filter,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

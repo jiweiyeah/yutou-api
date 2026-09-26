@@ -24,7 +24,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	info.InitChannelMeta(c)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		switch info.ApiType {
-		case appconstant.APITypeOpenAI, appconstant.APITypeCodex:
+		// APITypeKiteDelayed 的 Kite Router 线自己实现压缩（上游没有该端点），
+		// 由 adaptor 决定是自建压缩还是返回明确错误；Marathon 线会在取 URL 时被拒。
+		case appconstant.APITypeOpenAI, appconstant.APITypeCodex, appconstant.APITypeKiteDelayed:
 		default:
 			return types.NewErrorWithStatusCode(
 				fmt.Errorf("unsupported endpoint %q for api type %d", "/v1/responses/compact", info.ApiType),
