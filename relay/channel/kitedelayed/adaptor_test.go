@@ -1024,3 +1024,36 @@ func (r *failingReadCloser) Read([]byte) (int, error) {
 func (r *failingReadCloser) Close() error {
 	return nil
 }
+
+// Router 线的 /v1/responses 必须回 *dto.Usage：responses_handler.go 用裸断言
+// usage.(*dto.Usage) 取值，回值类型会 panic
+// （interface conversion: interface {} is dto.Usage, not *dto.Usage），
+// 且 gin 的 Recovery 会在已写出的响应后面追加一段 panic JSON。
+func TestKiteRouterResponsesReturnsUsagePointer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+			info := testRelayInfo("https://example.com/kite-router", stream)
+			info.RelayMode = relayconstant.RelayModeResponses
+			adaptor := &Adaptor{}
+			adaptor.Init(info)
+
+			body, err := common.Marshal(chatCompletionResult())
+			require.NoError(t, err)
+			response := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(body)),
+			}
+
+			result, apiErr := adaptor.DoResponse(ctx, response, info)
+			require.Nil(t, apiErr)
+			usage, ok := result.(*dto.Usage)
+			require.True(t, ok, "DoResponse 必须回 *dto.Usage，实际是 %T", result)
+			require.NotNil(t, usage)
+		})
+	}
+}

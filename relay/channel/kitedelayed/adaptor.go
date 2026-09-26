@@ -550,7 +550,9 @@ func (a *Adaptor) doKiteRouterResponses(c *gin.Context, resp *http.Response, inf
 			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 		}
 		service.IOCopyBytesGracefully(c, resp, responseBody)
-		return chatResp.Usage, nil
+		// 必须回指针：responses_handler.go 用裸断言 usage.(*dto.Usage) 取值，
+		// 返回值类型会 panic（interface conversion: dto.Usage, not *dto.Usage）。
+		return &chatResp.Usage, nil
 	}
 
 	// 流式：先把完整结果合成为 chat SSE，再逐 chunk 转成 responses 事件流。
