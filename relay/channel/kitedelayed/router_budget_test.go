@@ -902,3 +902,98 @@ func TestKiteRouterCompactionRejectsForeignTriggerlessFollowUp(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "input[0]")
 }
+
+// TestKiteRouterBudgetErrorNumbersAreSelfConsistent 钉住消息里的两个 token 数必须同口径。
+// 曾经出现过「约 258773 字节（约 64693 token），当前约 292185 字节（约 12498 token）」
+// 这种 23 字节/token 的自相矛盾 —— 后者来自网关对 responses 请求的 token 估算
+// （只统计部分字段，对工具调用密集的 Codex 请求严重低估）。判据是字节，消息也必须只用字节换算。
+func TestKiteRouterBudgetErrorNumbersAreSelfConsistent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetKiteRouterCaches()
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+
+	price, ok := kiteRouterLookupPrice(kiteRouterFallbackPrices, "gpt-6-astra")
+	require.True(t, ok)
+	budget := &kiteRouterBudget{
+		Model:       "gpt-6-astra",
+		PromptBytes: 292185,
+		MaxTokens:   8192,
+		SafeUSD:     kiteRouterDefaultSafeBudgetUSD,
+		Price:       price,
+	}
+	budget.RequiredUSD = price.requiredUSD(budget.PromptBytes, budget.MaxTokens)
+
+	adaptor := &Adaptor{}
+	apiErr := adaptor.kiteRouterBudgetError(ctx, nil, budget)
+	require.NotNil(t, apiErr)
+
+	// 消息里出现的一切 token 数都必须是 字节/4，否则口径不一致。
+	assert.Contains(t, apiErr.Error(), "292185")
+	assert.Contains(t, apiErr.Error(), "73046") // 292185/4
+	assert.Contains(t, apiErr.Error(), "258773")
+	assert.Contains(t, apiErr.Error(), "64693") // 258773/4
+	assert.NotContains(t, apiErr.Error(), "12498", "不得再混入网关那份不可靠的 token 估算")
+
+	var meta map[string]any
+	require.NoError(t, common.Unmarshal(apiErr.Metadata, &meta))
+	assert.EqualValues(t, 73046, meta["prompt_tokens"])
+	assert.EqualValues(t, 64693, meta["threshold_tokens"])
+	assert.EqualValues(t, kiteRouterBytesPerTokenForDisplay, meta["bytes_per_token_used"])
+	// 线上实测值（用户反馈那条报错的 metadata 就是 5.001174999999999）
+	assert.InDelta(t, 5.001175, meta["required_usd"], 0.000001)
+}
+
+func TestKiteRouterBudgetGateChannelKillSwitch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetKiteRouterCaches()
+	setupKiteRouterTestDB(t)
+
+	var chatCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case kiteRouterCatalogPath:
+			writeJSONResponse(t, w, http.StatusOK, kiteRouterTestCatalogResponse())
+		case routerPath:
+			chatCalls.Add(1)
+			writeJSONResponse(t, w, http.StatusOK, chatCompletionResult())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	disabled := true
+	build := func(off bool) (*dto.GeneralOpenAIRequest, error) {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+		info := testRelayInfo(server.URL+routerMarker, false)
+		info.RelayMode = relayconstant.RelayModeResponses
+		info.UpstreamModelName = "openai/gpt-6-astra"
+		if off {
+			info.ChannelOtherSettings = dto.ChannelOtherSettings{KiteRouterBudgetGateDisabled: &disabled}
+		}
+		var request dto.OpenAIResponsesRequest
+		require.NoError(t, common.Unmarshal([]byte(`{"model":"openai/gpt-6-astra","input":"`+strings.Repeat("x", 300000)+`"}`), &request))
+		adaptor := &Adaptor{}
+		adaptor.Init(info)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(ctx, info, request)
+		if err != nil {
+			return nil, err
+		}
+		return converted.(*dto.GeneralOpenAIRequest), nil
+	}
+
+	// 开关打开 → 超限请求放行（行为退回改动之前）
+	converted, err := build(true)
+	require.NoError(t, err, "渠道级逃生阀必须能让超限请求放行")
+	assert.NotEmpty(t, converted.Messages)
+
+	// 开关关闭 → 仍然拦
+	_, err = build(false)
+	require.Error(t, err)
+	apiErr, ok := err.(*types.NewAPIError)
+	require.True(t, ok)
+	assert.Equal(t, "context_budget_exceeded", string(apiErr.GetErrorCode()))
+}

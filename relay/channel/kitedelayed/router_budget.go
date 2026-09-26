@@ -355,6 +355,13 @@ func kiteRouterSafeBudgetUSD(info *relaycommon.RelayInfo) float64 {
 	return kiteRouterDefaultSafeBudgetUSD
 }
 
+// kiteRouterBudgetGateDisabled 是渠道级逃生阀：闸门误伤时可以按渠道直接关掉，
+// 行为退回本次改动之前（超限请求照发上游，由上游回 402），不必等发版。
+func kiteRouterBudgetGateDisabled(info *relaycommon.RelayInfo) bool {
+	disabled := kiteRouterOtherSettings(info).KiteRouterBudgetGateDisabled
+	return disabled != nil && *disabled
+}
+
 // kiteRouterEstimateBudget 计算一次请求的额度占用。价格取不到（模型不在目录也不在
 // 兜底表）时返回 nil，调用方据此跳过闸门 —— 不因为取价失败而拒绝请求。
 func (a *Adaptor) kiteRouterEstimateBudget(c *gin.Context, info *relaycommon.RelayInfo, modelName string, promptBytes, maxTokens int) *kiteRouterBudget {
@@ -380,6 +387,10 @@ func (a *Adaptor) kiteRouterEstimateBudget(c *gin.Context, info *relaycommon.Rel
 // 它是否注定 402，注定失败就返回可执行的明确错误，绝不白跑一次往返。
 // 通过时把估算结果挂到 gin context，供 doKiteRouterRequest 选 key 复用。
 func (a *Adaptor) applyKiteRouterBudgetGate(c *gin.Context, info *relaycommon.RelayInfo, modelName string, promptBytes, maxTokens int) *types.NewAPIError {
+	// 渠道级逃生阀：闸门误伤时运营可以直接关掉它（≤60s 生效），不必等发版。
+	if kiteRouterBudgetGateDisabled(info) {
+		return nil
+	}
 	budget := a.kiteRouterEstimateBudget(c, info, modelName, promptBytes, maxTokens)
 	if budget == nil {
 		return nil
@@ -427,10 +438,12 @@ func kiteRouterBudgetFrom(c *gin.Context) *kiteRouterBudget {
 
 func (a *Adaptor) kiteRouterBudgetError(c *gin.Context, info *relaycommon.RelayInfo, budget *kiteRouterBudget) *types.NewAPIError {
 	thresholdBytes := budget.Price.thresholdBytes(budget.SafeUSD)
-	promptTokens := 0
-	if info != nil {
-		promptTokens = info.GetEstimatePromptTokens()
-	}
+	// 两个 token 数必须用**同一口径**换算，否则消息自相矛盾（曾出现过
+	// 「约 258773 字节（约 64693 token），当前约 292185 字节（约 12498 token）」
+	// 这种 23 字节/token 的怪数字 —— 后者来自网关对 responses 请求的 token 估算，
+	// 它只统计了部分字段，对 Codex 这类工具调用密集的请求会严重低估）。
+	// 网关的 token 估算不是本闸门的判据（判据是字节），所以这里一律用字节换算。
+	promptTokens := budget.PromptBytes / kiteRouterBytesPerTokenForDisplay
 
 	options := []string{"压缩上下文（Codex 在接近上限时会自行压缩，也可手动触发）"}
 	if alternative := a.kiteRouterCheapestAlternative(c, info, budget); alternative != "" {
@@ -440,23 +453,24 @@ func (a *Adaptor) kiteRouterBudgetError(c *gin.Context, info *relaycommon.RelayI
 
 	var message strings.Builder
 	fmt.Fprintf(&message,
-		"模型 %s 在 $%.2f 安全线下的最大上下文约 %d 字节（约 %d token），当前请求约 %d 字节（约 %d token）。请任选其一：",
-		budget.Model, budget.SafeUSD, thresholdBytes, thresholdBytes/kiteRouterBytesPerTokenForDisplay,
-		budget.PromptBytes, promptTokens)
+		"当前会话上下文约 %d 字节（约 %d token），超过模型 %s 在本渠道的上限（约 %d 字节 / %d token）。请任选其一：",
+		budget.PromptBytes, promptTokens, budget.Model,
+		thresholdBytes, thresholdBytes/kiteRouterBytesPerTokenForDisplay)
 	for index, option := range options {
 		fmt.Fprintf(&message, "%s%s；", kiteRouterOptionMarker(index), option)
 	}
 
 	metadata, _ := common.Marshal(map[string]any{
-		"code":             "context_budget_exceeded",
-		"model":            budget.Model,
-		"required_usd":     budget.RequiredUSD,
-		"safe_budget_usd":  budget.SafeUSD,
-		"threshold_bytes":  thresholdBytes,
-		"threshold_tokens": thresholdBytes / kiteRouterBytesPerTokenForDisplay,
-		"prompt_bytes":     budget.PromptBytes,
-		"prompt_tokens":    promptTokens,
-		"max_tokens":       budget.MaxTokens,
+		"code":                 "context_budget_exceeded",
+		"model":                budget.Model,
+		"required_usd":         budget.RequiredUSD,
+		"safe_budget_usd":      budget.SafeUSD,
+		"threshold_bytes":      thresholdBytes,
+		"threshold_tokens":     thresholdBytes / kiteRouterBytesPerTokenForDisplay,
+		"prompt_bytes":         budget.PromptBytes,
+		"prompt_tokens":        promptTokens,
+		"bytes_per_token_used": kiteRouterBytesPerTokenForDisplay,
+		"max_tokens":           budget.MaxTokens,
 	})
 
 	return types.NewErrorWithStatusCode(

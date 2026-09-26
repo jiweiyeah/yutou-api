@@ -60,6 +60,10 @@ type ChannelOtherSettings struct {
 	// KiteRouterBalanceFilter 控制 Kite Router 线是否在选 key 时按缓存余额过滤候选。
 	// 为 nil 时按默认开启处理。
 	KiteRouterBalanceFilter *bool `json:"kite_router_balance_filter,omitempty"`
+	// KiteRouterBudgetGateDisabled 为 true 时**完全关闭** Kite Router 线的预算闸门，
+	// 请求行为退回本次改动之前（超限请求照发给上游，由上游回 402）。
+	// 逃生阀：闸门误伤时无需发版即可按渠道关掉。
+	KiteRouterBudgetGateDisabled *bool `json:"kite_router_budget_gate_disabled,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

@@ -354,7 +354,8 @@ func (a *Adaptor) buildKiteRouterCompactionRequest(c *gin.Context, info *relayco
 	}
 	budget.RequiredUSD = price.requiredUSD(budget.PromptBytes, budget.MaxTokens)
 	kiteRouterSetBudgetHeader(c, budget)
-	if budget.exceeded() {
+	// 逃生阀同样覆盖压缩调用，否则关掉闸门后压缩请求仍会被拒。
+	if budget.exceeded() && !kiteRouterBudgetGateDisabled(info) {
 		return nil, a.kiteRouterBudgetError(c, info, budget)
 	}
 

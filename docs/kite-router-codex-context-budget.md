@@ -171,6 +171,11 @@ threshold_bytes(model) = (SAFE_BUDGET_USD − max_output_tokens(model) × output
 > **实现注记（与原设计的两点差异）**：
 > 1. 闸门挂在 `ConvertOpenAIResponsesRequest` 里，覆盖 `/v1/responses`（含 v2 压缩）与
 >    `/v1/responses/compact` 两个 relay mode。`/v1/chat/completions` **不在范围内**（按 §3 的作用域约定）。
+> **逃生阀（渠道级，无需发版）**：渠道 `settings` 里设
+> `{"kite_router_budget_gate_disabled": true}` 可**完全关闭**该渠道的预算闸门，
+> 行为退回本次改动之前（超限请求照发上游、由上游回 402），≤60s 生效。
+> 压缩调用的预算检查同样受它控制。
+>
 > 2. 第 6 步的判定是「连续探测 8 个候选 key 都不够」而不是「池子里没有任何 key 够」——
 >    池子有上万 key，不可能穷举。探测全部**成功返回余额**且都不够时才拒绝；任何一次取余额
 >    失败都退回 middleware 已选定的 key（即今天的行为）。理由：8 个随机 key 同时不够的概率
@@ -352,16 +357,72 @@ JSON = { "v":1, "model":"gpt-6-astra", "at":<unix>, "tokens":<摘要后估算 to
 此时**不尝试压缩**（省一次往返），直接返回 §7 的错误。  
 ⇒ 所以 §5.1 的顺序是"**先估预算，再决定是否压缩**"，而不是"先压缩再看行不行"。
 
+### 6.6 🔴 为什么客户端**不会**自动压缩，以及怎么让它压
+
+这是上线后第一个真实反馈：用户撞线时看到的是 400 错误，而不是 Codex 自动开始压缩。
+**闸门本身没做错，是 §5.1 步骤 4a「由客户端触发压缩」这一步不会自动发生。**
+
+原因（源码级，`codex-rs/models-manager/src/model_info.rs` 的 fallback 元数据）：
+
+```rust
+// Codex 不认识我们的模型名（openai/gpt-6-astra 等）→ 用 fallback 元数据
+context_window: Some(272_000),
+max_context_window: Some(272_000),
+auto_compact_token_limit: None,        // ← 没有自动压缩阈值！
+used_fallback_model_metadata: true,
+```
+
+压缩触发条件是 `token_limit_reached = 自动压缩额度用尽 || 上下文窗口用尽`
+（`core/src/session/context_window.rs:108`）。`auto_compact_token_limit` 为 `None` 时，
+Codex 只能等到 **272,000 × 95% ≈ 25.8 万 token** 才压缩 —— 而我们的 $4.5 线是
+**25.8 万字节**（≈6.5 万 token 口径），**晚了约 4 倍**。
+于是它把超限请求直接发出来，被闸门拒掉。
+
+**⇒ 要让压缩真的发生，必须把阈值告诉客户端。两条路：**
+
+| 方案 | 做法 | 评价 |
+| --- | --- | --- |
+| **A. 客户端一行配置** | `config.toml` 顶层 `model_auto_compact_token_limit = 60000` | 立即可用、零开发；但每个用户要配一次，且数值要随上游价格手工更新 |
+| **B. 网关下发模型目录** | 让客户端设 `model_catalog_url = "<网关>/v1/model_catalog"`，由网关按 §4.2 动态算出 `auto_compact_token_limit` 下发 | 零手工算数、随上游价格自动更新；需新增端点 + 真机验证（**未实现**） |
+
+B 的可行性已核对：`ModelProviderInfo.model_catalog_url` 存在
+（`codex-rs/model-provider-info/src/lib.rs:144`），Codex 会去拉
+`{"models":[ModelInfo...]}`（`codex-api/src/endpoint/models.rs:80`），
+而 `ModelInfo.auto_compact_token_limit: Option<i64>` 正是可反序列化字段
+（`codex-rs/protocol/src/openai_models.rs:460`）。
+
+**实测（本地 + 真实 codex 0.157.1）**：把 `model_auto_compact_token_limit` 设成 1000 后，
+第二轮**真的触发了压缩**（Codex 日志出现 `context compacted`，
+网关日志出现一条 13,037 token、输出 163 token 的摘要请求）。
+⇒ 机制成立，缺的只是"把阈值送到客户端"。
+
+**⚠️ 一个必须知道的边界：压缩不是万能的**。Codex 的**本地**压缩用
+`build_compacted_history(Vec::new(), &user_messages, &summary)` 重建历史
+（`core/src/compact.rs:368`）——**用户消息会被整段保留**。所以：
+
+- 正常场景（大头是工具输出）：压缩后只剩「基线指令 + 用户消息 + 摘要」，
+  远低于 258 KB 的线 ⇒ 压缩有效。
+- **用户手动粘贴一大坨**（比如 300 KB 的日志）：压缩后那坨仍在 ⇒ 仍然超线，
+  这时只有「新开会话」或「改用便宜模型」（luna 的线是 14.9 MB）能救。
+  这正是 §6.5 说的「单条输入本身就超阈值」，错误文案里已经给了这两条出路。
+
 ## 7. 明确错误（兜底，绝不静默）
 
 统一用 `types.NewErrorWithStatusCode` + `ErrOptionWithMetadata`，HTTP 400，并带上可执行信息。
 **实际实现输出的文案**（`relay/channel/kitedelayed/router_budget.go`）：
 
 ```
-模型 openai/gpt-6-astra 在 $4.50 安全线下的最大上下文约 258773 字节（约 64693 token），
-当前请求约 300000 字节（约 0 token）。请任选其一：① 压缩上下文（Codex 在接近上限时会自行压缩，
-也可手动触发）；② 改用 upstage/solar-pro4（同上下文约 $0.04）；③ 新开会话；
+当前会话上下文约 292185 字节（约 73046 token），超过模型 gpt-6-astra 在本渠道的上限
+（约 258773 字节 / 64693 token）。请任选其一：① 压缩上下文（Codex 在接近上限时会自行压缩，
+也可手动触发）；② 改用 upstage/solar-pro4（同上下文约 $0.05）；③ 新开会话；
 ```
+
+> ⚠️ **两个 token 数必须同一口径（字节/4）**。首版把「当前」那个数取自
+> `info.GetEstimatePromptTokens()`，而网关对 responses 请求的 token 估算只统计部分字段
+> （工具调用密集的 Codex 请求会严重低估），于是线上出现了
+> 「约 258773 字节（约 64693 token），当前约 292185 字节（约 12498 token）」
+> 这种 23 字节/token 的自相矛盾。判据是字节，消息也只用字节换算；
+> metadata 里额外给出 `bytes_per_token_used` 说明换算口径。
 
 `metadata`（客户端可编程处理）：
 
