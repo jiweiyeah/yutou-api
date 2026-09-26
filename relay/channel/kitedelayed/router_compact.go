@@ -226,35 +226,42 @@ func kiteRouterCompactionPlanFrom(c *gin.Context) *kiteRouterCompactionPlan {
 
 // kiteRouterCompactionModel 在渠道在售模型里挑压缩专用模型：优先「阈值永不触发」
 // 的那一档，再取其中输入价最低的（压缩成本几乎全在输入侧）。
-func kiteRouterCompactionModel(models []string, catalog map[string]kiteRouterModelPrice, safeBudgetUSD float64) (string, kiteRouterModelPrice, bool) {
+//
+// 价格必须按**映射后的上游名**查：渠道声明的可能是纯别名（如 `gpt-5-codex` → `gpt-6-astra`），
+// 那个名字在上游目录里根本不存在，直接按声明名查价会让这类渠道一个候选都选不出来。
+//
+// 返回 (渠道声明的模型名, 上游模型名, 价格, 是否找到)。
+func kiteRouterCompactionModel(channel *model.Channel, catalog map[string]kiteRouterModelPrice, safeBudgetUSD float64) (string, string, kiteRouterModelPrice, bool) {
 	bestSafe, bestAny := "", ""
+	upstreamSafe, upstreamAny := "", ""
 	var priceSafe, priceAny kiteRouterModelPrice
-	for _, candidate := range models {
+	for _, candidate := range channel.GetModels() {
 		name := strings.TrimSpace(candidate)
 		if name == "" {
 			continue
 		}
-		price, ok := kiteRouterLookupPrice(catalog, name)
+		upstream := kiteRouterUpstreamModelName(channel, catalog, name)
+		price, ok := kiteRouterLookupPrice(catalog, upstream)
 		if !ok || !price.usable() {
 			continue
 		}
 		if bestAny == "" || kiteRouterPriceLess(price, priceAny) {
-			bestAny, priceAny = name, price
+			bestAny, upstreamAny, priceAny = name, upstream, price
 		}
 		if price.canTriggerBudget(safeBudgetUSD) {
 			continue
 		}
 		if bestSafe == "" || kiteRouterPriceLess(price, priceSafe) {
-			bestSafe, priceSafe = name, price
+			bestSafe, upstreamSafe, priceSafe = name, upstream, price
 		}
 	}
 	if bestSafe != "" {
-		return bestSafe, priceSafe, true
+		return bestSafe, upstreamSafe, priceSafe, true
 	}
 	if bestAny != "" {
-		return bestAny, priceAny, true
+		return bestAny, upstreamAny, priceAny, true
 	}
-	return "", kiteRouterModelPrice{}, false
+	return "", "", kiteRouterModelPrice{}, false
 }
 
 func kiteRouterPriceLess(left, right kiteRouterModelPrice) bool {
@@ -307,13 +314,12 @@ func (a *Adaptor) buildKiteRouterCompactionRequest(c *gin.Context, info *relayco
 
 	safeBudget := kiteRouterSafeBudgetUSD(info)
 	catalog := a.kiteRouterCatalogFor(c, info)
-	summaryModel, price, ok := kiteRouterCompactionModel(channel.GetModels(), catalog, safeBudget)
+	_, upstreamSummaryModel, price, ok := kiteRouterCompactionModel(channel, catalog, safeBudget)
 	if !ok {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("no usable upstream model price for Kite Router compaction on channel %d", info.ChannelId),
 			types.ErrorCode("compaction_model_unavailable"), http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
-	upstreamSummaryModel := kiteRouterUpstreamModelName(channel, catalog, summaryModel)
 	// 日志里要如实写出「这一轮实际上游用的是哪个模型」，否则事后排查根本看不出
 	// 压缩调用发去了哪（UpstreamModelName 只用于日志与响应 model 字段，不参与计费）。
 	info.UpstreamModelName = upstreamSummaryModel

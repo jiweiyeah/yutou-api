@@ -412,22 +412,55 @@ func TestKiteRouterBudgetScopeIsolation(t *testing.T) {
 	assert.Equal(t, int32(0), bypassCalls.Load(), "Marathon 线不得发起任何 catalog/credits 旁路请求")
 }
 
+func kiteRouterTestChannel(models string, mapping string) *model.Channel {
+	channel := &model.Channel{Models: models}
+	if mapping != "" {
+		channel.ModelMapping = common.GetPointer(mapping)
+	}
+	return channel
+}
+
 func TestKiteRouterCompactionModelPrefersCheapestNeverTriggering(t *testing.T) {
-	models := []string{"openai/gpt-6-astra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "upstage/solar-pro4"}
+	channel := kiteRouterTestChannel("openai/gpt-6-astra,openai/gpt-5.6-sol,openai/gpt-5.6-luna,upstage/solar-pro4", "")
 
 	// 有「永不触发」档时，取其中输入价最低的。
-	name, price, ok := kiteRouterCompactionModel(models, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
+	name, upstream, price, ok := kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
 	require.True(t, ok)
 	assert.Equal(t, "upstage/solar-pro4", name)
 	assert.Equal(t, 0.135, price.InputPerMillion)
+	// 没配映射时，上游名退回目录里的裸 id（上游只认裸 id）。
+	assert.Equal(t, "solar-pro4", upstream)
 
 	// 目录里只剩会触发的模型时，退化为「最便宜的那个」，而不是报错。
-	name, _, ok = kiteRouterCompactionModel([]string{"openai/gpt-6-astra", "openai/gpt-5.6-sol"}, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
+	channel = kiteRouterTestChannel("openai/gpt-6-astra,openai/gpt-5.6-sol", "")
+	name, _, _, ok = kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
 	require.True(t, ok)
 	assert.Equal(t, "openai/gpt-5.6-sol", name)
 
 	// 一个都没有 → 明确失败，调用方返回 compaction_model_unavailable。
-	_, _, ok = kiteRouterCompactionModel([]string{"unknown/model"}, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
+	channel = kiteRouterTestChannel("unknown/model", "")
+	_, _, _, ok = kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
+	assert.False(t, ok)
+}
+
+// TestKiteRouterCompactionModelResolvesAliasesThroughModelMapping 钉住纯别名渠道：
+// 声明名在上游目录里不存在（如 gpt-5-codex → gpt-6-astra），价格必须按映射后的名字查，
+// 否则这类渠道一个候选都选不出来。
+func TestKiteRouterCompactionModelResolvesAliasesThroughModelMapping(t *testing.T) {
+	channel := kiteRouterTestChannel(
+		"gpt-5-codex,my-cheap-alias",
+		`{"gpt-5-codex":"gpt-6-astra","my-cheap-alias":"solar-pro4"}`,
+	)
+	name, upstream, price, ok := kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
+	require.True(t, ok)
+	// 两个别名都不在目录里；映射后一个贵一个便宜，应选中便宜的那个。
+	assert.Equal(t, "my-cheap-alias", name)
+	assert.Equal(t, "solar-pro4", upstream)
+	assert.Equal(t, 0.135, price.InputPerMillion)
+
+	// 别名映射到一个目录里也没有的模型 → 选不出来（不猜）。
+	channel = kiteRouterTestChannel("mystery", `{"mystery":"not-in-catalog"}`)
+	_, _, _, ok = kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
 	assert.False(t, ok)
 }
 
@@ -651,13 +684,11 @@ func TestKiteRouterDoRequestLeavesOther402Untouched(t *testing.T) {
 }
 
 func TestKiteRouterCompactionModelSelectionIgnoresUnknownModels(t *testing.T) {
-	name, price, ok := kiteRouterCompactionModel(
-		[]string{"", "  ", "vendor/unknown-model", "openai/gpt-5.6-luna"},
-		kiteRouterFallbackPrices,
-		kiteRouterDefaultSafeBudgetUSD,
-	)
+	channel := kiteRouterTestChannel("  ,vendor/unknown-model,openai/gpt-5.6-luna", "")
+	name, upstream, price, ok := kiteRouterCompactionModel(channel, kiteRouterFallbackPrices, kiteRouterDefaultSafeBudgetUSD)
 	require.True(t, ok)
 	assert.Equal(t, "openai/gpt-5.6-luna", name)
+	assert.Equal(t, "gpt-5.6-luna", upstream)
 	assert.Equal(t, 0.30, price.InputPerMillion)
 }
 
