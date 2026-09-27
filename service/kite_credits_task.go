@@ -27,18 +27,24 @@ const (
 	// kiteCreditsAuthFailGuardMinChecked exempts small pools from the 401
 	// guard: their blast radius is one easily re-enabled channel.
 	kiteCreditsAuthFailGuardMinChecked = 10
+	// kiteCreditsDefaultEnableRatio 是「重新启用阈值 / 禁用阈值」的默认倍数。
+	// 两个阈值之间留一条死区，否则余额在阈值附近抖动时 key 会被反复启停。
+	kiteCreditsDefaultEnableRatio = 2
 )
 
 type KiteCreditsScanSummary struct {
-	Channels       int     `json:"channels"`
-	KeysChecked    int     `json:"keys_checked"`
-	LowBalanceKeys int     `json:"low_balance_keys"`
-	AuthFailedKeys int     `json:"auth_failed_keys"`
-	DisabledKeys   int     `json:"disabled_keys"`
-	RequestErrors  int     `json:"request_errors"`
-	SkippedKeys    int     `json:"skipped_keys"`
-	DisableErrors  int     `json:"disable_errors"`
-	ThresholdUSD   float64 `json:"threshold_usd"`
+	Channels           int     `json:"channels"`
+	KeysChecked        int     `json:"keys_checked"`
+	LowBalanceKeys     int     `json:"low_balance_keys"`
+	AuthFailedKeys     int     `json:"auth_failed_keys"`
+	DisabledKeys       int     `json:"disabled_keys"`
+	EnabledKeys        int     `json:"enabled_keys"`
+	RequestErrors      int     `json:"request_errors"`
+	SkippedKeys        int     `json:"skipped_keys"`
+	DisableErrors      int     `json:"disable_errors"`
+	EnableErrors       int     `json:"enable_errors"`
+	ThresholdUSD       float64 `json:"threshold_usd"`
+	EnableThresholdUSD float64 `json:"enable_threshold_usd"`
 }
 
 type kiteCreditsResponse struct {
@@ -47,8 +53,9 @@ type kiteCreditsResponse struct {
 }
 
 type kiteCreditJob struct {
-	channel *model.Channel
-	key     string
+	channel    *model.Channel
+	key        string
+	wasEnabled bool
 }
 
 type kiteCreditResult struct {
@@ -57,6 +64,7 @@ type kiteCreditResult struct {
 	balance    float64
 	err        error
 	authFailed bool
+	wasEnabled bool
 }
 
 type kiteCreditsRequestError struct {
@@ -64,19 +72,36 @@ type kiteCreditsRequestError struct {
 	err   error
 }
 
-// RunKiteCreditsScan checks each enabled Kite Delayed key concurrently and
-// auto-disables keys whose remaining USD credit is at or below the configured
-// threshold, as well as keys the upstream rejects with HTTP 401 (dead keys).
-// Other transient HTTP/API errors are reported but never disable a key.
-// As a safety valve, 401-based disabling is skipped for a channel when the
-// failing share exceeds KITE_CREDITS_AUTH_FAIL_MAX_RATIO (default 0.2): that
-// pattern indicates an upstream auth outage rather than a batch of dead keys.
+// RunKiteCreditsScan probes every enabled or auto-disabled Kite Delayed key with a
+// read-only GET /v1/credits and makes the pool reflect that probe:
+//   - credit at or below KITE_CREDITS_DISABLE_THRESHOLD (default 0.10) is
+//     auto-disabled, as is a key the upstream rejects with HTTP 401 (dead key);
+//   - credit at or above the enable threshold (the disable threshold times
+//     KITE_CREDITS_ENABLE_RATIO, default 2) re-enables a key that was
+//     auto-disabled, so a topped-up key comes back instead of staying dead
+//     forever;
+//   - anything in between leaves the key as it is — the dead band is what keeps
+//     a balance hovering around the threshold from flapping.
+//
+// Manually disabled keys (status 2) are never probed and never re-enabled: the
+// job must not overrule a human. Other transient HTTP/API errors are reported
+// but never change a key.
+//
+// Every verdict is then applied to *all* Kite Delayed channels that hold the
+// key, not just the channel it was probed through: the same upstream account is
+// commonly mounted on several channels (Marathon + Kite Router), and key state
+// is stored per channel.
+//
+// As a safety valve, 401-based disabling is skipped when the failing share
+// exceeds KITE_CREDITS_AUTH_FAIL_MAX_RATIO (default 0.2): that pattern indicates
+// an upstream auth outage rather than a batch of dead keys.
 func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) (KiteCreditsScanSummary, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	threshold := kiteCreditsDisableThreshold()
-	summary := KiteCreditsScanSummary{ThresholdUSD: threshold}
+	enableThreshold := kiteCreditsEnableThreshold(threshold)
+	summary := KiteCreditsScanSummary{ThresholdUSD: threshold, EnableThresholdUSD: enableThreshold}
 
 	channels, err := model.GetEnabledChannelsWithKeysByType(constant.ChannelTypeKiteDelayed)
 	if err != nil {
@@ -92,7 +117,8 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 			continue
 		}
 		for index, key := range keys {
-			if channel.ChannelInfo.IsMultiKey && kiteMultiKeyStatus(channel, index) != common.ChannelStatusEnabled {
+			// 自动禁用的 key 也要探：不然余额回升后没人知道它能用了。
+			if channel.ChannelInfo.IsMultiKey && kiteMultiKeyStatus(channel, index) == common.ChannelStatusManuallyDisabled {
 				summary.SkippedKeys++
 				continue
 			}
@@ -101,7 +127,11 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 				summary.SkippedKeys++
 				continue
 			}
-			jobs = append(jobs, kiteCreditJob{channel: channel, key: key})
+			jobs = append(jobs, kiteCreditJob{
+				channel:    channel,
+				key:        key,
+				wasEnabled: !channel.ChannelInfo.IsMultiKey || kiteMultiKeyStatus(channel, index) == common.ChannelStatusEnabled,
+			})
 		}
 	}
 
@@ -152,19 +182,26 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 	authFailedByChannel := make(map[int]map[string]string)
 	disableReasonsByChannel := make(map[int]map[string]string)
 	requestErrorsByChannel := make(map[int]kiteCreditsRequestError)
+	recoveredKeys := make(map[string]struct{})
 	for result := range resultCh {
 		processed++
 		if report != nil {
 			report(processed, len(jobs))
 		}
-		checkedByChannel[result.channel.Id]++
+		// 401 熔断闸门的分母只算「扫描开始时还在启用」的 key：已经被禁用的 key
+		// 再 401 也不可能被禁第二次，算进去只会稀释闸门的灵敏度。
+		if result.wasEnabled {
+			checkedByChannel[result.channel.Id]++
+		}
 		if result.err != nil {
 			if result.authFailed {
-				summary.AuthFailedKeys++
-				if authFailedByChannel[result.channel.Id] == nil {
-					authFailedByChannel[result.channel.Id] = make(map[string]string)
+				if result.wasEnabled {
+					summary.AuthFailedKeys++
+					if authFailedByChannel[result.channel.Id] == nil {
+						authFailedByChannel[result.channel.Id] = make(map[string]string)
+					}
+					authFailedByChannel[result.channel.Id][result.key] = fmt.Sprintf("Kite credits key unauthorized: %v", result.err)
 				}
-				authFailedByChannel[result.channel.Id][result.key] = fmt.Sprintf("Kite credits key unauthorized: %v", result.err)
 				continue
 			}
 			summary.RequestErrors++
@@ -176,7 +213,13 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 			requestErrorsByChannel[result.channel.Id] = entry
 			continue
 		}
-		if result.balance > threshold {
+		if result.balance >= enableThreshold {
+			recoveredKeys[result.key] = struct{}{}
+			continue
+		}
+		// 已经禁用的 key 只是被探来确认能不能放回，余额低不低已经没有新信息了：
+		// 计数和禁用判定都只看扫描开始时还在启用的那些。
+		if result.balance > threshold || !result.wasEnabled {
 			continue
 		}
 
@@ -263,6 +306,44 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 		summary.DisabledKeys += disabled
 	}
 
+	// 余额回到 enableThreshold 以上的 key 走同一套跨渠道下发。用
+	// EnableAutoDisabledChannelKeys 而不是 EnableChannelKeys：只翻自动禁用的那一档，
+	// 人工禁用（status=2）的绝不碰。
+	mergedEnableKeys := make(map[string]struct{}, len(recoveredKeys))
+	for key := range recoveredKeys {
+		if _, conflicting := mergedDisableReasons[key]; conflicting {
+			continue // 同一轮里两个渠道读出相反结论，以「低余额」为准
+		}
+		mergedEnableKeys[key] = struct{}{}
+	}
+	if len(mergedEnableKeys) > 0 {
+		keysToEnable := make([]string, 0, len(mergedEnableKeys))
+		for key := range mergedEnableKeys {
+			keysToEnable = append(keysToEnable, key)
+		}
+		for _, channel := range channels {
+			if !channel.GetAutoBan() {
+				continue
+			}
+			held := 0
+			for _, key := range channel.GetKeys() {
+				if _, ok := mergedEnableKeys[strings.TrimSpace(key)]; ok {
+					held++
+				}
+			}
+			if held == 0 {
+				continue
+			}
+			enabled, err := model.EnableAutoDisabledChannelKeys(channel.Id, keysToEnable)
+			if err != nil {
+				summary.EnableErrors += held
+				common.SysError(fmt.Sprintf("Kite credits failed to re-enable recovered keys in channel #%d: %v", channel.Id, err))
+				continue
+			}
+			summary.EnabledKeys += enabled
+		}
+	}
+
 	return summary, nil
 }
 
@@ -288,7 +369,7 @@ func kiteCreditsHostBaseURL(channelBaseURL string) string {
 }
 
 func checkKiteCredits(ctx context.Context, job kiteCreditJob) kiteCreditResult {
-	result := kiteCreditResult{channel: job.channel, key: job.key}
+	result := kiteCreditResult{channel: job.channel, key: job.key, wasEnabled: job.wasEnabled}
 	requestCtx, cancel := context.WithTimeout(ctx, kiteCreditsRequestTimeout)
 	defer cancel()
 
@@ -371,6 +452,19 @@ func kiteCreditsDisableThreshold() float64 {
 		return kiteCreditsDefaultThreshold
 	}
 	return threshold
+}
+
+// kiteCreditsEnableThreshold 返回重新启用一个自动禁用 key 所需的余额下限。
+// 默认是禁用阈值的 KITE_CREDITS_ENABLE_RATIO 倍：两个阈值之间留一条死区，
+// 否则余额在阈值附近抖动时 key 会被反复启停。
+func kiteCreditsEnableThreshold(disableThreshold float64) float64 {
+	raw := strings.TrimSpace(common.GetEnvOrDefaultString("KITE_CREDITS_ENABLE_RATIO", "2"))
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 1 {
+		common.SysError(fmt.Sprintf("invalid KITE_CREDITS_ENABLE_RATIO=%q, using %d", raw, kiteCreditsDefaultEnableRatio))
+		ratio = kiteCreditsDefaultEnableRatio
+	}
+	return disableThreshold * ratio
 }
 
 func kiteCreditsAuthFailMaxRatio() float64 {

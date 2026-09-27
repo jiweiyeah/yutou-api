@@ -1112,7 +1112,19 @@ func AutoDisableChannelKeys(channelId int, reasonsByKey map[string]string) (int,
 // or already enabled while the caller was probing are ignored, and a manually
 // disabled channel is never touched. The channel itself is re-enabled only when
 // it was auto-disabled and at least one key is usable again.
+// EnableChannelKeys 重新启用给定的 key，包含 status=2（手动禁用）的那些 —— 这是
+// 管理侧批量启用的语义。
 func EnableChannelKeys(channelId int, keysToEnable []string) (int, error) {
+	return enableChannelKeys(channelId, keysToEnable, false)
+}
+
+// EnableAutoDisabledChannelKeys 只重新启用 status=3（自动禁用）的 key，绝不碰
+// status=2（手动禁用）—— 定时任务不该推翻人工决定。
+func EnableAutoDisabledChannelKeys(channelId int, keysToEnable []string) (int, error) {
+	return enableChannelKeys(channelId, keysToEnable, true)
+}
+
+func enableChannelKeys(channelId int, keysToEnable []string, autoDisabledOnly bool) (int, error) {
 	if len(keysToEnable) == 0 {
 		return 0, nil
 	}
@@ -1165,6 +1177,16 @@ func EnableChannelKeys(channelId int, keysToEnable []string) (int, error) {
 				status, exists := channel.ChannelInfo.MultiKeyStatusList[index]
 				if !exists || status == common.ChannelStatusEnabled {
 					continue
+				}
+				if autoDisabledOnly && status != common.ChannelStatusAutoDisabled {
+					continue
+				}
+				// 还在自愈冷却期里的 key 别提前放回来：那类禁用（如上游 429 触发的
+				// 定时禁用）和「余额不足」是两回事，等它自己到期。
+				if autoDisabledOnly {
+					if until, ok := channel.ChannelInfo.MultiKeyDisabledUntil[index]; ok && until > common.GetTimestamp() {
+						continue
+					}
 				}
 				delete(channel.ChannelInfo.MultiKeyStatusList, index)
 				delete(channel.ChannelInfo.MultiKeyDisabledReason, index)

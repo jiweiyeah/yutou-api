@@ -273,6 +273,115 @@ func TestKiteAuthFailGuardTripped(t *testing.T) {
 	}
 }
 
+// 余额回升的 key 要在所有持有它的渠道上一起重新启用；人工禁用（status=2）的绝不碰；
+// 落在禁用阈值与启用阈值之间的死区里保持原状。
+func TestRunKiteCreditsScanReenablesRecoveredKeyAcrossChannels(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	oldDB := model.DB
+	oldHTTPClient := httpClient
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	t.Cleanup(func() {
+		model.DB = oldDB
+		httpClient = oldHTTPClient
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	t.Setenv("KITE_CREDITS_DISABLE_THRESHOLD", "0.10")
+	t.Setenv("KITE_CREDITS_TASK_CONCURRENCY", "3")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer recovered-key":
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"4.000000"}`))
+		case "Bearer band-key":
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"0.150000"}`))
+		case "Bearer still-low-key":
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"0.050000"}`))
+		default:
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"9.000000"}`))
+		}
+	}))
+	defer server.Close()
+	httpClient = server.Client()
+
+	autoBan := 1
+	sharedKeys := "recovered-key\nmanual-key\nband-key\nstill-low-key\ncooling-key"
+	newChannel := func(name, baseURL string) *model.Channel {
+		return &model.Channel{
+			Type:    constant.ChannelTypeKiteDelayed,
+			Name:    name,
+			Key:     sharedKeys,
+			Status:  common.ChannelStatusEnabled,
+			AutoBan: &autoBan,
+			BaseURL: &baseURL,
+			ChannelInfo: model.ChannelInfo{
+				IsMultiKey:   true,
+				MultiKeySize: 5,
+				MultiKeyStatusList: map[int]int{
+					0: common.ChannelStatusAutoDisabled,     // 余额已回升，应被放回
+					1: common.ChannelStatusManuallyDisabled, // 人工禁用，不该被任务推翻
+					2: common.ChannelStatusAutoDisabled,     // 落在死区里，保持原状
+					3: common.ChannelStatusAutoDisabled,     // 余额依然不足，保持原状且不计数
+					4: common.ChannelStatusAutoDisabled,     // 还在自愈冷却期内，不该提前放回
+				},
+				MultiKeyDisabledUntil: map[int]int64{
+					4: common.GetTimestamp() + 3600,
+				},
+			},
+		}
+	}
+	healthy := newChannel("marathon", server.URL)
+	require.NoError(t, db.Create(healthy).Error)
+	brokenURL := "http://127.0.0.1:1"
+	broken := newChannel("marathon-router-gray", brokenURL)
+	require.NoError(t, db.Create(broken).Error)
+
+	summary, err := RunKiteCreditsScan(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 8, summary.KeysChecked)   // 两个渠道各探 4 个（跳过人工禁用的那个）
+	assert.Equal(t, 2, summary.SkippedKeys)   // 两个渠道各跳过 1 个人工禁用的 key
+	assert.Equal(t, 4, summary.RequestErrors) // 兄弟渠道四个 key 全部探测失败
+	assert.Equal(t, 2, summary.EnabledKeys)   // 两个渠道各放回同一个 key
+	assert.Zero(t, summary.DisabledKeys)
+	// 已经禁用的 key 余额依然很低，但不该再计入「本轮发现多少低余额 key」。
+	assert.Zero(t, summary.LowBalanceKeys)
+	assert.Zero(t, summary.EnableErrors)
+	assert.InDelta(t, 0.20, summary.EnableThresholdUSD, 1e-9)
+
+	for _, channelID := range []int{healthy.Id, broken.Id} {
+		reloaded, err := model.GetChannelById(channelID, true)
+		require.NoError(t, err)
+		_, recoveredStillDisabled := reloaded.ChannelInfo.MultiKeyStatusList[0]
+		assert.False(t, recoveredStillDisabled, "channel #%d 的 recovered-key 应被放回", channelID)
+		assert.Equal(t, common.ChannelStatusManuallyDisabled, reloaded.ChannelInfo.MultiKeyStatusList[1],
+			"channel #%d 的 manual-key 必须保持人工禁用", channelID)
+		assert.Equal(t, common.ChannelStatusAutoDisabled, reloaded.ChannelInfo.MultiKeyStatusList[2],
+			"channel #%d 的 band-key 在死区内应保持原状", channelID)
+		assert.Equal(t, common.ChannelStatusAutoDisabled, reloaded.ChannelInfo.MultiKeyStatusList[3],
+			"channel #%d 的 still-low-key 应保持原状", channelID)
+		assert.Equal(t, common.ChannelStatusAutoDisabled, reloaded.ChannelInfo.MultiKeyStatusList[4],
+			"channel #%d 的 cooling-key 在自愈冷却期内应保持原状", channelID)
+	}
+}
+
+func TestKiteCreditsEnableThresholdLeavesDeadBand(t *testing.T) {
+	t.Setenv("KITE_CREDITS_ENABLE_RATIO", "3")
+	assert.InDelta(t, 0.30, kiteCreditsEnableThreshold(0.10), 1e-9)
+
+	t.Setenv("KITE_CREDITS_ENABLE_RATIO", "0.5") // 小于 1 会让两个阈值倒挂
+	assert.InDelta(t, 0.20, kiteCreditsEnableThreshold(0.10), 1e-9)
+
+	t.Setenv("KITE_CREDITS_ENABLE_RATIO", "not-a-number")
+	assert.InDelta(t, 0.20, kiteCreditsEnableThreshold(0.10), 1e-9)
+}
+
 func TestParseKiteCreditsBalanceRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name  string
