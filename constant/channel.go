@@ -61,6 +61,14 @@ const (
 
 )
 
+// KiteDelayedRouterMarker 是 Kite Delayed 渠道 base_url 上的后缀标记：带上它走
+// gokite 的 Kite Router 线，不带则走 Marathon 线。它只用于选路，不是上游的真实路径
+// —— 任何拿这个渠道的 base_url 去拼 host 级端点（如 /v1/credits）的地方都必须先
+// 剥掉它，否则会拼出 /kite-router/... 并被上游回 404。
+// 放在 constant 里而不是 relay/channel/kitedelayed：后者依赖 service，service
+// 不能反向依赖它。
+const KiteDelayedRouterMarker = "/kite-router"
+
 var ChannelBaseURLs = []string{
 	"",                                    // 0
 	"https://api.openai.com",              // 1

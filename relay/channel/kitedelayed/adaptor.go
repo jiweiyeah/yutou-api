@@ -42,7 +42,7 @@ const (
 	//
 	// 用 base_url 而不是模型名来分流：kimi-k3 / deepseek-v4-pro 两条线都有，
 	// 按模型名没法表达「新渠道走 Router、老渠道继续走 Marathon」这种灰度。
-	routerMarker = "/kite-router"
+	routerMarker = constant.KiteDelayedRouterMarker
 	// Kite Router 上游只提供 chat completions，三种入口（chat / responses /
 	// messages）都打到这个路径，格式转换由 relayconvert 在进出上游前后完成。
 	routerPath                   = "/v1/chat/completions"

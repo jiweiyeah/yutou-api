@@ -241,6 +241,17 @@ func kiteMultiKeyStatus(channel *model.Channel, index int) int {
 	return common.ChannelStatusEnabled
 }
 
+// kiteCreditsHostBaseURL 返回 /v1/credits 所在的 host 根地址。Kite Delayed 渠道用
+// base_url 的后缀区分 gokite 的两条线（Marathon / Kite Router），但 /v1/credits 是
+// host 级端点、两条线共用 —— 不剥掉标记就会拼出 /kite-router/v1/credits，上游回 404。
+func kiteCreditsHostBaseURL(channelBaseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(channelBaseURL), "/")
+	if strings.HasSuffix(strings.ToLower(trimmed), constant.KiteDelayedRouterMarker) {
+		trimmed = strings.TrimRight(trimmed[:len(trimmed)-len(constant.KiteDelayedRouterMarker)], "/")
+	}
+	return trimmed
+}
+
 func checkKiteCredits(ctx context.Context, job kiteCreditJob) kiteCreditResult {
 	result := kiteCreditResult{channel: job.channel, key: job.key}
 	requestCtx, cancel := context.WithTimeout(ctx, kiteCreditsRequestTimeout)
@@ -251,7 +262,7 @@ func checkKiteCredits(ctx context.Context, job kiteCreditJob) kiteCreditResult {
 		result.err = err
 		return result
 	}
-	requestURL := strings.TrimRight(job.channel.GetBaseURL(), "/") + kiteCreditsPath
+	requestURL := kiteCreditsHostBaseURL(job.channel.GetBaseURL()) + kiteCreditsPath
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		result.err = err

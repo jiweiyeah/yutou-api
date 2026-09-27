@@ -204,3 +204,43 @@ func TestParseKiteCreditsBalanceRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestKiteCreditsHostBaseURLStripsRouterMarker(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		expected string
+	}{
+		{
+			name:     "marathon line without marker",
+			baseURL:  "https://delayed-inference.prod.gokite.ai",
+			expected: "https://delayed-inference.prod.gokite.ai",
+		},
+		{
+			name:     "router line strips marker",
+			baseURL:  "https://delayed-inference.prod.gokite.ai/kite-router",
+			expected: "https://delayed-inference.prod.gokite.ai",
+		},
+		{
+			name:     "trailing slash and uppercase marker",
+			baseURL:  "https://delayed-inference.prod.gokite.ai/Kite-Router/",
+			expected: "https://delayed-inference.prod.gokite.ai",
+		},
+		{
+			name:     "surrounding whitespace",
+			baseURL:  "  https://delayed-inference.prod.gokite.ai/kite-router  ",
+			expected: "https://delayed-inference.prod.gokite.ai",
+		},
+		{
+			name:     "marker-looking path segment is not a suffix",
+			baseURL:  "https://example.com/kite-router/v1",
+			expected: "https://example.com/kite-router/v1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.expected, kiteCreditsHostBaseURL(test.baseURL))
+		})
+	}
+}
