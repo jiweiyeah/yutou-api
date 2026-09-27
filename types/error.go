@@ -88,9 +88,15 @@ const (
 )
 
 type NewAPIError struct {
-	Err                 error
-	RelayError          any
-	skipRetry           bool
+	Err        error
+	RelayError any
+	skipRetry  bool
+	// forceRetry lets an adaptor claim "another channel can safely re-answer
+	// this" on an error that also carries skipRetry. skipRetry has a second
+	// meaning in service.ShouldDisableChannel, where it suppresses automatic
+	// channel disabling, so adaptors that rely on that suppression keep it and
+	// set forceRetry on top instead of dropping it.
+	forceRetry          bool
 	autoDisableChannel  bool
 	channelDisableUntil int64
 	retryAfterSeconds   int
@@ -386,6 +392,16 @@ func IsSkipRetryError(err *NewAPIError) bool {
 	return err.skipRetry
 }
 
+// IsForceRetryError reports whether an adaptor explicitly asked the relay loop to
+// try another channel for this error, overriding skipRetry.
+func IsForceRetryError(err *NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+
+	return err.forceRetry
+}
+
 func IsChannelAutoDisableError(err *NewAPIError) bool {
 	if err == nil {
 		return false
@@ -412,6 +428,16 @@ func GetRetryAfterSeconds(err *NewAPIError) int {
 func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.skipRetry = true
+	}
+}
+
+// ErrOptionWithForceRetry marks a skip-retry error as retryable across channels.
+// Use it when skipRetry is needed for something else (typically to keep
+// service.ShouldDisableChannel from banning the channel) but the failure itself
+// leaves no billed work behind, so another channel can answer the same request.
+func ErrOptionWithForceRetry() NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.forceRetry = true
 	}
 }
 

@@ -817,6 +817,78 @@ func TestAdaptorDoRequestKiteRouterSurfacesUpstreamError(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not support stream")
 }
 
+func TestAdaptorKiteRouterChannelFallbackClassification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 回落标记只影响「换不换渠道」，不能改变自动禁用判定：10821/10867 共用同一个 key 池，
+	// 一次 5xx 风暴若连带摘掉 key，会把两条线一起打死。
+	originalAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = originalAutoDisable })
+
+	tests := []struct {
+		name           string
+		upstreamStatus int
+		expectFallback bool
+	}{
+		{name: "502 provider not wired up", upstreamStatus: http.StatusBadGateway, expectFallback: true},
+		{name: "504 edge gave up on a long generation", upstreamStatus: http.StatusGatewayTimeout, expectFallback: true},
+		{name: "400 unsupported parameter", upstreamStatus: http.StatusBadRequest, expectFallback: false},
+		{name: "401 rejected key", upstreamStatus: http.StatusUnauthorized, expectFallback: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSONResponse(t, w, tt.upstreamStatus, map[string]any{"detail": "upstream refused"})
+			}))
+			defer server.Close()
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			info := testRelayInfo(server.URL+routerMarker, false)
+			adaptor := &Adaptor{}
+			adaptor.Init(info)
+
+			_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"deepseek-v4-pro","messages":[]}`))
+			require.Error(t, err)
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, tt.upstreamStatus, apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(apiErr), "auto-disable must stay suppressed either way")
+			assert.Equal(t, tt.expectFallback, types.IsForceRetryError(apiErr))
+			assert.False(t, service.ShouldDisableChannel(apiErr), "a fallback candidate must not disable the shared key pool")
+		})
+	}
+}
+
+func TestAdaptorKiteRouterClientCancelDoesNotFallBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(t, w, http.StatusOK, chatCompletionResult())
+	}))
+	defer server.Close()
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")).WithContext(requestCtx)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	info := testRelayInfo(server.URL+routerMarker, false)
+	adaptor := &Adaptor{}
+	adaptor.Init(info)
+
+	_, err := adaptor.DoRequest(ctx, info, strings.NewReader(`{"model":"deepseek-v4-pro","messages":[]}`))
+	require.Error(t, err)
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, clientClosedStatus, apiErr.StatusCode)
+	assert.False(t, types.IsForceRetryError(apiErr), "an abandoned request must not be re-answered on another channel")
+}
+
 func TestAdaptorDoResponseKiteRouterConvertsChatToResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

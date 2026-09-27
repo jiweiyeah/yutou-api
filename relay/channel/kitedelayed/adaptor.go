@@ -345,7 +345,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		statusResp, err := a.doJSONRequest(c, info, pollCtx, http.MethodGet, statusURL, nil)
 		if err != nil {
 			if pollCtx.Err() != nil {
-				return nil, kitePollContextError(pollCtx.Err())
+				return nil, kiteContextError("poll", pollCtx.Err())
 			}
 			return nil, kiteRequestError("poll", err, http.StatusBadGateway)
 		}
@@ -404,7 +404,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return nil, kitePollContextError(pollCtx.Err())
+			return nil, kiteContextError("poll", pollCtx.Err())
 		case <-timer.C:
 		}
 	}
@@ -501,12 +501,27 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 	info.UpstreamRequestBodySize = int64(len(requestJSON))
 	resp, err := a.doJSONRequest(c, info, upstreamCtx, http.MethodPost, requestURL, bytes.NewReader(requestJSON))
 	if err != nil {
-		return nil, kiteRequestError("router", err, http.StatusBadGateway)
+		// 客户端断开（心跳写失败会 cancel 掉 upstreamCtx）不是渠道故障：既不能回落到
+		// 别的渠道白烧一次额度，也不能计入渠道健康度。
+		if ctxErr := upstreamCtx.Err(); ctxErr != nil {
+			return nil, kiteContextError("router", ctxErr)
+		}
+		return nil, kiteRequestError("router", err, http.StatusBadGateway, types.ErrOptionWithForceRetry())
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, readErr := readAndCloseResponse(resp, maximumBodySize)
 		if readErr != nil {
-			return nil, kiteRequestError("read router response", readErr, http.StatusBadGateway)
+			if ctxErr := upstreamCtx.Err(); ctxErr != nil {
+				return nil, kiteContextError("read router response", ctxErr)
+			}
+			return nil, kiteRequestError("read router response", readErr, http.StatusBadGateway, types.ErrOptionWithForceRetry())
+		}
+		// Router 是同步接口：5xx 意味着对端在产出任何内容之前就放弃了（实测其边缘代理
+		// 在 60s 掐断长生成并回 504）。这一类失败没有留下已计费的作业，换渠道重答是安全的，
+		// 而 skipRetry 要保留 —— 它是 ShouldDisableChannel 目前唯一的「别禁用本渠道」信号。
+		// 4xx 是这次请求本身或这个 key 的结论，换渠道也改不了，维持不可重试。
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return nil, kiteHTTPError("router", resp.StatusCode, body, types.ErrOptionWithForceRetry())
 		}
 		return nil, kiteHTTPError("router", resp.StatusCode, body)
 	}
@@ -870,25 +885,29 @@ func readAndCloseResponse(resp *http.Response, limit int64) ([]byte, error) {
 	return readLimited(resp.Body, limit)
 }
 
-func kiteRequestError(operation string, err error, statusCode int) *types.NewAPIError {
+func kiteRequestError(operation string, err error, statusCode int, opts ...types.NewAPIErrorOptions) *types.NewAPIError {
+	options := append([]types.NewAPIErrorOptions{types.ErrOptionWithSkipRetry()}, opts...)
 	return types.NewErrorWithStatusCode(
 		fmt.Errorf("Kite Delayed %s failed: %w", operation, err),
 		types.ErrorCodeDoRequestFailed,
 		statusCode,
-		types.ErrOptionWithSkipRetry(),
+		options...,
 	)
 }
 
-func kitePollContextError(err error) *types.NewAPIError {
-	if errors.Is(err, context.Canceled) {
+// kiteContextError 把「上下文自己被中止」映射成渠道错误。判断必须基于 ctx.Err()，
+// 不能对请求错误用 errors.Is(err, context.Canceled)：relay/channel 的 doRequest 会用
+// ErrOptionWithHideErrMsg 整体替换原始 error，unwrap 链在那一步就断了。
+func kiteContextError(operation string, ctxErr error) *types.NewAPIError {
+	if errors.Is(ctxErr, context.Canceled) {
 		return types.NewErrorWithStatusCode(
-			fmt.Errorf("Kite Delayed poll canceled by client: %w", err),
+			fmt.Errorf("Kite Delayed %s canceled by client: %w", operation, ctxErr),
 			types.ErrorCodeDoRequestFailed,
 			clientClosedStatus,
 			types.ErrOptionWithSkipRetry(),
 		)
 	}
-	return kiteRequestError("poll", err, http.StatusGatewayTimeout)
+	return kiteRequestError(operation, ctxErr, http.StatusGatewayTimeout)
 }
 
 func kitePostSubmitError(err *types.NewAPIError) *types.NewAPIError {
@@ -899,12 +918,12 @@ func kitePostSubmitError(err *types.NewAPIError) *types.NewAPIError {
 	return err
 }
 
-func kiteHTTPError(operation string, statusCode int, body []byte) *types.NewAPIError {
+func kiteHTTPError(operation string, statusCode int, body []byte, opts ...types.NewAPIErrorOptions) *types.NewAPIError {
 	message := strings.TrimSpace(string(body))
 	if message == "" {
 		message = http.StatusText(statusCode)
 	}
-	return kiteRequestError(operation, fmt.Errorf("upstream returned HTTP %d: %s", statusCode, message), statusCode)
+	return kiteRequestError(operation, fmt.Errorf("upstream returned HTTP %d: %s", statusCode, message), statusCode, opts...)
 }
 
 func jobErrorMessage(value any) string {

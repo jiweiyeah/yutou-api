@@ -353,7 +353,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if types.IsChannelError(openaiErr) {
 		return true
 	}
-	if types.IsSkipRetryError(openaiErr) {
+	if types.IsSkipRetryError(openaiErr) && !types.IsForceRetryError(openaiErr) {
 		return false
 	}
 	if retryTimes <= 0 {
@@ -361,6 +361,12 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	}
 	if _, ok := c.Get("specific_channel_id"); ok {
 		return false
+	}
+	// A forced retry bypasses the status-code table on purpose: 504 is globally
+	// non-retryable because a gateway timeout usually means the upstream already
+	// did the work, which an adaptor that marks forceRetry has ruled out.
+	if types.IsForceRetryError(openaiErr) {
+		return true
 	}
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {
