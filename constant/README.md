@@ -8,6 +8,7 @@
 |----------------------|---------------------------------------------------------------------|
 | `azure.go`           | 定义与 Azure 相关的全局常量，如 `AzureNoRemoveDotTime`（控制删除 `.` 的截止时间）。         |
 | `cache_key.go`       | 缓存键格式字符串及 Token 相关字段常量，统一缓存命名规则。                                    |
+| `channel.go`         | 渠道类型编号、类型名映射、`ChannelBaseURLs` 默认地址，以及渠道级选路标记（如 `KiteDelayedRouterMarker`）。 |
 | `channel_setting.go` | Channel 级别的设置键，如 `proxy`、`force_format` 等。                          |
 | `context_key.go`     | 定义 `ContextKey` 类型以及在整个项目中使用的上下文键常量（请求时间、Token/Channel/User 相关信息等）。 |
 | `env.go`             | 环境配置相关的全局变量，在启动阶段根据配置文件或环境变量注入。                                     |
