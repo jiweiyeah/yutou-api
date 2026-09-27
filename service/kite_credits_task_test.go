@@ -98,6 +98,93 @@ func TestRunKiteCreditsScanDisablesOnlyLowBalanceKeys(t *testing.T) {
 	assert.False(t, erroredDisabled)
 }
 
+// 两个渠道共用同一个 key 池（生产里 10821 Marathon 与 10867 Kite Router 就是这种
+// 布局），其中只有一个渠道能正常探测。判定必须下发到所有持有该 key 的渠道，否则
+// 另一个渠道会继续拿这个已经余额不足的 key 去撞上游 402。
+func TestRunKiteCreditsScanFansOutDisableAcrossSharedKeyPool(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	oldDB := model.DB
+	oldHTTPClient := httpClient
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldMainDatabaseType := common.MainDatabaseType()
+	t.Cleanup(func() {
+		model.DB = oldDB
+		httpClient = oldHTTPClient
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		common.SetMainDatabaseType(oldMainDatabaseType)
+	})
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	t.Setenv("KITE_CREDITS_DISABLE_THRESHOLD", "0.10")
+	t.Setenv("KITE_CREDITS_TASK_CONCURRENCY", "3")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer low-key":
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"0.03"}`))
+		default:
+			_, _ = w.Write([]byte(`{"currency":"USD","balance":"4.900000"}`))
+		}
+	}))
+	defer server.Close()
+	httpClient = server.Client()
+
+	autoBan := 1
+	sharedKeys := "low-key\nhealthy-key"
+	healthy := &model.Channel{
+		Type:    constant.ChannelTypeKiteDelayed,
+		Name:    "marathon",
+		Key:     sharedKeys,
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+		BaseURL: &server.URL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       2,
+			MultiKeyStatusList: map[int]int{},
+		},
+	}
+	require.NoError(t, db.Create(healthy).Error)
+
+	// 探测全线失败的兄弟渠道：它自己探不出任何结论，但必须照样接收禁用判定。
+	brokenURL := "http://127.0.0.1:1"
+	broken := &model.Channel{
+		Type:    constant.ChannelTypeKiteDelayed,
+		Name:    "marathon-router-gray",
+		Key:     sharedKeys,
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+		BaseURL: &brokenURL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       2,
+			MultiKeyStatusList: map[int]int{},
+		},
+	}
+	require.NoError(t, db.Create(broken).Error)
+
+	summary, err := RunKiteCreditsScan(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, summary.Channels)
+	assert.Equal(t, 4, summary.KeysChecked)
+	assert.Equal(t, 1, summary.LowBalanceKeys)
+	assert.Equal(t, 2, summary.RequestErrors) // 兄弟渠道两个 key 全部探测失败
+	assert.Equal(t, 2, summary.DisabledKeys)  // 两个渠道各摘掉同一个 key
+
+	for _, channelID := range []int{healthy.Id, broken.Id} {
+		reloaded, err := model.GetChannelById(channelID, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusAutoDisabled, reloaded.ChannelInfo.MultiKeyStatusList[0],
+			"channel #%d 的 low-key 应被禁用", channelID)
+		_, healthyDisabled := reloaded.ChannelInfo.MultiKeyStatusList[1]
+		assert.False(t, healthyDisabled, "channel #%d 的 healthy-key 不该被禁用", channelID)
+	}
+}
+
 func TestRunKiteCreditsScanAuthFailGuardSkipsMassDisable(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)

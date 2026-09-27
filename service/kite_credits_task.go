@@ -191,6 +191,9 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 	// 401-based disabling is skipped wholesale for a channel when too many of
 	// its keys fail auth at once — that is an upstream auth outage, not a batch
 	// of dead keys. Guard-tripped keys are reported as request errors instead.
+	// They are also recorded in guardedKeys so the cross-channel fan-out below
+	// cannot re-disable them through a sibling channel that did not trip.
+	guardedKeys := make(map[string]struct{})
 	for channelID, failedKeys := range authFailedByChannel {
 		checked := checkedByChannel[channelID]
 		if kiteAuthFailGuardTripped(len(failedKeys), checked, authFailMaxRatio) {
@@ -201,6 +204,9 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 				entry.err = fmt.Errorf("upstream returned HTTP %d", http.StatusUnauthorized)
 			}
 			requestErrorsByChannel[channelID] = entry
+			for key := range failedKeys {
+				guardedKeys[key] = struct{}{}
+			}
 			common.SysError(fmt.Sprintf("Kite credits auth-fail disable skipped for channel #%d: %d/%d checked keys returned HTTP 401, exceeding guard ratio %.2f", channelID, len(failedKeys), checked, authFailMaxRatio))
 			continue
 		}
@@ -218,11 +224,40 @@ func RunKiteCreditsScan(ctx context.Context, report func(processed, total int)) 
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
-	for channelID, reasonsByKey := range disableReasonsByChannel {
-		disabled, err := model.AutoDisableChannelKeys(channelID, reasonsByKey)
+
+	// 同一个上游账号常常同时挂在多个 Kite Delayed 渠道上（10821 Marathon 与
+	// 10867 Kite Router 就是同一个 key 池）。禁停状态是按渠道存的，所以判定必须
+	// 并成一份再逐渠道下发：只写判定出来的那个渠道，另一个渠道会继续拿这个
+	// key 去撞上游。AutoDisableChannelKeys 只处理渠道自己持有的 key，把并集
+	// 传给不持有它的渠道是无害的空操作。
+	mergedDisableReasons := make(map[string]string, len(disableReasonsByChannel))
+	for _, reasonsByKey := range disableReasonsByChannel {
+		for key, reason := range reasonsByKey {
+			if _, guarded := guardedKeys[key]; guarded {
+				continue
+			}
+			if _, exists := mergedDisableReasons[key]; !exists {
+				mergedDisableReasons[key] = reason
+			}
+		}
+	}
+	for _, channel := range channels {
+		if !channel.GetAutoBan() {
+			continue // 该渠道明确不参与自动禁停，别把并集灌进去
+		}
+		affected := 0
+		for _, key := range channel.GetKeys() {
+			if _, ok := mergedDisableReasons[strings.TrimSpace(key)]; ok {
+				affected++
+			}
+		}
+		if affected == 0 {
+			continue
+		}
+		disabled, err := model.AutoDisableChannelKeys(channel.Id, mergedDisableReasons)
 		if err != nil {
-			summary.DisableErrors += len(reasonsByKey)
-			common.SysError(fmt.Sprintf("Kite credits failed to disable low-balance keys in channel #%d: %v", channelID, err))
+			summary.DisableErrors += affected
+			common.SysError(fmt.Sprintf("Kite credits failed to disable low-balance keys in channel #%d: %v", channel.Id, err))
 			continue
 		}
 		summary.DisabledKeys += disabled
