@@ -252,6 +252,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
+		// Applied after processChannelError so the admin error log and the
+		// auto-disable rules keep seeing the upstream's own wording, and before
+		// shouldRetry so a rewrite that lowers the status code (or sets
+		// skip_retry) also stops retries of a request that cannot succeed.
+		// relayInfo.LastError deliberately keeps the raw error: param_override
+		// conditions on last_error_* must not silently change meaning.
+		newAPIError = service.ApplyChannelErrorRewrite(c, newAPIError, bodyStorage.Size())
+
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}

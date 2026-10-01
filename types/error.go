@@ -431,6 +431,16 @@ func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 	}
 }
 
+// ErrOptionWithErrorCode replaces the error code reported to the client and used
+// by the retry / auto-disable tables. It exists for channel-level error
+// rewriting, where the upstream code describes the upstream's own framing
+// (e.g. "model_not_available") rather than what actually went wrong.
+func ErrOptionWithErrorCode(code ErrorCode) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.errorCode = code
+	}
+}
+
 // ErrOptionWithForceRetry marks a skip-retry error as retryable across channels.
 // Use it when skipRetry is needed for something else (typically to keep
 // service.ShouldDisableChannel from banning the channel) but the failure itself

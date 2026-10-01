@@ -35,25 +35,104 @@ const (
 )
 
 type ChannelOtherSettings struct {
-	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
-	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"` // "json" or "api_key"
-	OpenRouterEnterprise                  *bool                 `json:"openrouter_enterprise,omitempty"`
-	ClaudeBetaQuery                       bool                  `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
-	AllowServiceTier                      bool                  `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）
-	AllowInferenceGeo                     bool                  `json:"allow_inference_geo,omitempty"`        // 是否允许 inference_geo 透传（仅 Claude，默认过滤以满足数据驻留合规
-	AllowSpeed                            bool                  `json:"allow_speed,omitempty"`                // 是否允许 speed 透传（仅 Claude，默认过滤以避免意外切换推理速度模式）
-	AllowSafetyIdentifier                 bool                  `json:"allow_safety_identifier,omitempty"`    // 是否允许 safety_identifier 透传（默认过滤以保护用户隐私）
-	DisableStore                          bool                  `json:"disable_store,omitempty"`              // 是否禁用 store 透传（默认允许透传，禁用后可能导致 Codex 无法使用）
-	AllowIncludeObfuscation               bool                  `json:"allow_include_obfuscation,omitempty"`  // 是否允许 stream_options.include_obfuscation 透传（默认过滤以避免关闭流混淆保护）
-	DisableTaskPollingSleep               bool                  `json:"disable_task_polling_sleep,omitempty"` // 是否跳过异步任务轮询间隔
-	AwsKeyType                            AwsKeyType            `json:"aws_key_type,omitempty"`
-	UpstreamModelUpdateCheckEnabled       bool                  `json:"upstream_model_update_check_enabled,omitempty"`        // 是否检测上游模型更新
-	UpstreamModelUpdateAutoSyncEnabled    bool                  `json:"upstream_model_update_auto_sync_enabled,omitempty"`    // 是否自动同步上游模型更新
-	UpstreamModelUpdateLastCheckTime      int64                 `json:"upstream_model_update_last_check_time,omitempty"`      // 上次检测时间
-	UpstreamModelUpdateLastDetectedModels []string              `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
-	UpstreamModelUpdateLastRemovedModels  []string              `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
-	UpstreamModelUpdateIgnoredModels      []string              `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
-	AdvancedCustom                        *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
+	AzureResponsesVersion                 string                    `json:"azure_responses_version,omitempty"`
+	VertexKeyType                         VertexKeyType             `json:"vertex_key_type,omitempty"` // "json" or "api_key"
+	OpenRouterEnterprise                  *bool                     `json:"openrouter_enterprise,omitempty"`
+	ClaudeBetaQuery                       bool                      `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
+	AllowServiceTier                      bool                      `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）
+	AllowInferenceGeo                     bool                      `json:"allow_inference_geo,omitempty"`        // 是否允许 inference_geo 透传（仅 Claude，默认过滤以满足数据驻留合规
+	AllowSpeed                            bool                      `json:"allow_speed,omitempty"`                // 是否允许 speed 透传（仅 Claude，默认过滤以避免意外切换推理速度模式）
+	AllowSafetyIdentifier                 bool                      `json:"allow_safety_identifier,omitempty"`    // 是否允许 safety_identifier 透传（默认过滤以保护用户隐私）
+	DisableStore                          bool                      `json:"disable_store,omitempty"`              // 是否禁用 store 透传（默认允许透传，禁用后可能导致 Codex 无法使用）
+	AllowIncludeObfuscation               bool                      `json:"allow_include_obfuscation,omitempty"`  // 是否允许 stream_options.include_obfuscation 透传（默认过滤以避免关闭流混淆保护）
+	DisableTaskPollingSleep               bool                      `json:"disable_task_polling_sleep,omitempty"` // 是否跳过异步任务轮询间隔
+	AwsKeyType                            AwsKeyType                `json:"aws_key_type,omitempty"`
+	UpstreamModelUpdateCheckEnabled       bool                      `json:"upstream_model_update_check_enabled,omitempty"`        // 是否检测上游模型更新
+	UpstreamModelUpdateAutoSyncEnabled    bool                      `json:"upstream_model_update_auto_sync_enabled,omitempty"`    // 是否自动同步上游模型更新
+	UpstreamModelUpdateLastCheckTime      int64                     `json:"upstream_model_update_last_check_time,omitempty"`      // 上次检测时间
+	UpstreamModelUpdateLastDetectedModels []string                  `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
+	UpstreamModelUpdateLastRemovedModels  []string                  `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
+	UpstreamModelUpdateIgnoredModels      []string                  `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
+	AdvancedCustom                        *AdvancedCustomConfig     `json:"advanced_custom,omitempty"`
+	ErrorRewrite                          []ChannelErrorRewriteRule `json:"error_rewrite,omitempty"` // 上游错误改写规则
+}
+
+// ChannelErrorRewriteRule rewrites an upstream error before it reaches the
+// downstream client.
+//
+// Why this exists: some upstreams report a well-understood condition with a
+// misleading status code and message, and the client has no way to tell the
+// difference. atria-asi, for example, answers an oversized request body with
+// `404 Atria-Dawn-Preview is not supported by TokenPlan` — which reads like a
+// model-availability problem but is really a payload-size gate. Rewriting is
+// configured per channel so the next upstream that does this needs no code
+// change. Rules are evaluated in order and the first match wins.
+type ChannelErrorRewriteRule struct {
+	// Match is a case-insensitive substring of the upstream error message.
+	// It must not be empty: a rule that matches everything would silently hide
+	// every upstream failure on the channel.
+	Match string `json:"match"`
+	// StatusCode replaces the HTTP status code sent to the client.
+	// 0 keeps the upstream status code.
+	StatusCode int `json:"status_code,omitempty"`
+	// Message replaces the client-facing message. Supports the placeholders
+	// {body_bytes}, {body_kb}, {model} and {upstream_message}. Empty keeps the
+	// upstream message.
+	Message string `json:"message,omitempty"`
+	// Code replaces error.code (and error.type on OpenAI-shaped errors).
+	// Empty keeps the upstream code.
+	Code string `json:"code,omitempty"`
+	// SkipRetry stops the relay loop from retrying this error on another key
+	// or channel. Use it when the failure is a property of the request itself,
+	// so every retry is guaranteed to fail the same way and only adds latency.
+	SkipRetry bool `json:"skip_retry,omitempty"`
+}
+
+const (
+	ChannelErrorRewriteMatchLimit   = 512
+	ChannelErrorRewriteMessageLimit = 2048
+	ChannelErrorRewriteCodeLimit    = 64
+)
+
+// Validate checks one rewrite rule. It is called on channel save so a typo is
+// rejected at configuration time instead of silently doing nothing at runtime.
+func (r ChannelErrorRewriteRule) Validate(index int) error {
+	if strings.TrimSpace(r.Match) == "" {
+		return fmt.Errorf("error_rewrite[%d].match is required", index)
+	}
+	if len(r.Match) > ChannelErrorRewriteMatchLimit {
+		return fmt.Errorf("error_rewrite[%d].match is too long (max %d bytes)", index, ChannelErrorRewriteMatchLimit)
+	}
+	if r.StatusCode != 0 && (r.StatusCode < 400 || r.StatusCode > 599) {
+		return fmt.Errorf("error_rewrite[%d].status_code must be 0 or between 400 and 599", index)
+	}
+	if len(r.Message) > ChannelErrorRewriteMessageLimit {
+		return fmt.Errorf("error_rewrite[%d].message is too long (max %d bytes)", index, ChannelErrorRewriteMessageLimit)
+	}
+	if len(r.Code) > ChannelErrorRewriteCodeLimit {
+		return fmt.Errorf("error_rewrite[%d].code is too long (max %d bytes)", index, ChannelErrorRewriteCodeLimit)
+	}
+	return nil
+}
+
+// ValidateErrorRewrite validates every rule and rejects duplicates, which are
+// dead configuration because only the first match is ever applied.
+func (s *ChannelOtherSettings) ValidateErrorRewrite() error {
+	if s == nil || len(s.ErrorRewrite) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(s.ErrorRewrite))
+	for i, rule := range s.ErrorRewrite {
+		if err := rule.Validate(i); err != nil {
+			return err
+		}
+		key := strings.ToLower(strings.TrimSpace(rule.Match))
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("error_rewrite[%d].match duplicates an earlier rule: %s", i, rule.Match)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
