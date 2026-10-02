@@ -108,6 +108,29 @@ export interface ChannelOtherSettings {
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
   advanced_custom?: AdvancedCustomConfig
+  error_rewrite?: ChannelErrorRewriteRule[]
+}
+
+/**
+ * Rewrites an upstream error before it reaches the client.
+ *
+ * Some upstreams report a well-understood condition with a misleading status
+ * code and message. atria-asi, for example, answers an oversized request body
+ * with `404 Atria-Dawn-Preview is not supported by TokenPlan`, which reads like
+ * a model-availability problem. Rules are matched in order against the upstream
+ * message; the first match wins.
+ */
+export interface ChannelErrorRewriteRule {
+  /** Case-insensitive substring of the upstream error message. Required. */
+  match?: string
+  /** Replacement HTTP status code; 0 or unset keeps the upstream status. */
+  status_code?: number
+  /** Replacement client-facing message; supports {body_bytes}, {body_kb}, {model}, {upstream_message}. */
+  message?: string
+  /** Replacement error.code; unset keeps the upstream code. */
+  code?: string
+  /** Stop retrying this error on other keys/channels. */
+  skip_retry?: boolean
 }
 
 export interface AdvancedCustomConfig {

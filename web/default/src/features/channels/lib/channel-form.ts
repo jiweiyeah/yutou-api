@@ -129,6 +129,60 @@ function addRequiredIssue(
   })
 }
 
+// Upstream error rewrite rules are edited as a structured list, so the element
+// shape stays permissive here and every constraint is reported from
+// superRefine with a rule index — that keeps the message on the `error_rewrite`
+// field itself instead of a nested path the FormMessage cannot render.
+const errorRewriteRuleSchema = z.object({
+  match: z.string().optional(),
+  status_code: z.number().optional(),
+  message: z.string().optional(),
+  code: z.string().optional(),
+  skip_retry: z.boolean().optional(),
+})
+
+function validateErrorRewriteRules(
+  ctx: z.RefinementCtx,
+  rules: z.infer<typeof errorRewriteRuleSchema>[] | undefined
+): void {
+  const list = rules ?? []
+  const seenMatches = new Map<string, number>()
+  list.forEach((rule, index) => {
+    const match = String(rule?.match ?? '').trim()
+    if (!match) {
+      addRequiredIssue(
+        ctx,
+        'error_rewrite',
+        `Rewrite rule ${index + 1}: match text is required`
+      )
+      return
+    }
+    const normalized = match.toLowerCase()
+    const firstIndex = seenMatches.get(normalized)
+    if (firstIndex !== undefined) {
+      addRequiredIssue(
+        ctx,
+        'error_rewrite',
+        `Rewrite rule ${index + 1}: match text duplicates rule ${firstIndex + 1}`
+      )
+      return
+    }
+    seenMatches.set(normalized, index)
+
+    const statusCode = Number(rule?.status_code)
+    if (
+      rule?.status_code !== undefined &&
+      (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599)
+    ) {
+      addRequiredIssue(
+        ctx,
+        'error_rewrite',
+        `Rewrite rule ${index + 1}: status code must be between 400 and 599`
+      )
+    }
+  })
+}
+
 export const channelFormSchema = z
   .object({
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
@@ -211,6 +265,8 @@ export const channelFormSchema = z
     upstream_model_update_check_enabled: z.boolean().optional(),
     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
     upstream_model_update_ignored_models: z.string().optional(),
+    // Upstream error rewrite rules (stored in settings JSON)
+    error_rewrite: z.array(errorRewriteRuleSchema).optional(),
   })
   .superRefine((data, ctx) => {
     if ([3, 8, 36, 45].includes(data.type) && !data.base_url?.trim()) {
@@ -302,6 +358,8 @@ export const channelFormSchema = z
         'Vertex AI API Key mode does not support batch creation'
       )
     }
+
+    validateErrorRewriteRules(ctx, data.error_rewrite)
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -362,6 +420,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
   advanced_custom: '',
+  error_rewrite: [],
 }
 
 // ============================================================================
@@ -420,6 +479,7 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
   let advancedCustom = ''
+  let errorRewriteRules: z.infer<typeof errorRewriteRuleSchema>[] = []
 
   if (channel.settings) {
     try {
@@ -448,6 +508,24 @@ export function transformChannelToFormDefaults(
       if (parsed.advanced_custom) {
         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
       }
+      const rawErrorRewriteRules: unknown[] = Array.isArray(
+        parsed.error_rewrite
+      )
+        ? parsed.error_rewrite
+        : []
+      errorRewriteRules = rawErrorRewriteRules
+        .filter(
+          (rule): rule is Record<string, unknown> =>
+            typeof rule === 'object' && rule !== null && !Array.isArray(rule)
+        )
+        .map((rule) => ({
+          match: typeof rule.match === 'string' ? rule.match : '',
+          status_code:
+            typeof rule.status_code === 'number' ? rule.status_code : undefined,
+          message: typeof rule.message === 'string' ? rule.message : '',
+          code: typeof rule.code === 'string' ? rule.code : '',
+          skip_retry: rule.skip_retry === true,
+        }))
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Failed to parse channel settings:', error)
@@ -499,6 +577,7 @@ export function transformChannelToFormDefaults(
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
     advanced_custom: advancedCustom,
+    error_rewrite: errorRewriteRules,
   }
 }
 
@@ -645,6 +724,42 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     }
   } else if ('advanced_custom' in settingsObj) {
     delete settingsObj.advanced_custom
+  }
+
+  // Upstream error rewrite rules apply to every channel type. Blank rules are
+  // dropped and unset optional fields are omitted, so the stored JSON matches
+  // the shape the backend expects.
+  const errorRewriteRules = (formData.error_rewrite ?? [])
+    .map((rule) => {
+      const normalized: Record<string, unknown> = {
+        match: String(rule?.match ?? '').trim(),
+      }
+      const statusCode = Number(rule?.status_code)
+      if (
+        Number.isInteger(statusCode) &&
+        statusCode >= 400 &&
+        statusCode <= 599
+      ) {
+        normalized.status_code = statusCode
+      }
+      const message = String(rule?.message ?? '').trim()
+      if (message) {
+        normalized.message = message
+      }
+      const code = String(rule?.code ?? '').trim()
+      if (code) {
+        normalized.code = code
+      }
+      if (rule?.skip_retry === true) {
+        normalized.skip_retry = true
+      }
+      return normalized
+    })
+    .filter((rule) => rule.match)
+  if (errorRewriteRules.length > 0) {
+    settingsObj.error_rewrite = errorRewriteRules
+  } else {
+    delete settingsObj.error_rewrite
   }
 
   return JSON.stringify(settingsObj)
