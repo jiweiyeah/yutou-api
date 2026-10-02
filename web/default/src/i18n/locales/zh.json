@@ -2393,6 +2393,7 @@
     "JustSong": "JustSong",
     "K": "K",
     "Keelcode token auto-renewal": "Keelcode Token 自动续期",
+    "Atria key pool recovery": "Atria 密钥池回收",
     "Keep affinity when channel is disabled": "渠道禁用后保留亲和",
     "Keep enabled if you need to proxy requests for different upstream accounts.": "如果需要为不同上游账户代理请求，请保持启用。",
     "Keep enough balance before production traffic": "生产流量前保持充足余额",

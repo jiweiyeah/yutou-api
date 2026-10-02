@@ -90,6 +90,7 @@ const TYPE_LABEL: Record<string, string> = {
   // ===== CUSTOM START: 任务显示名 =====
   deepseek_free_tier_recovery: "TokenHarbor free tier recharge monitor",
   keelcode_token_refresh: "Keelcode token auto-renewal",
+  atria_key_recovery: "Atria key pool recovery",
   // ===== CUSTOM END =====
 };
 

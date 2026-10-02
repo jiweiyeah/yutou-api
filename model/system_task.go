@@ -26,6 +26,9 @@ const (
 	// ===== CUSTOM START: keelcode token 自动续期 =====
 	SystemTaskTypeKeelcodeTokenRefresh = "keelcode_token_refresh"
 	// ===== CUSTOM END =====
+	// ===== CUSTOM START: atria key 池回收 =====
+	SystemTaskTypeAtriaKeyRecovery = "atria_key_recovery"
+	// ===== CUSTOM END =====
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

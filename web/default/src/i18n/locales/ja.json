@@ -2393,6 +2393,7 @@
     "JustSong": "JustSong",
     "K": "K",
     "Keelcode token auto-renewal": "Keelcode トークン自動更新",
+    "Atria key pool recovery": "Atria キープール回復",
     "Keep affinity when channel is disabled": "チャネル無効時にアフィニティを保持",
     "Keep enabled if you need to proxy requests for different upstream accounts.": "異なる上流アカウントのリクエストをプロキシする必要がある場合は有効にしたままにしてください。",
     "Keep enough balance before production traffic": "本番トラフィック前に十分な残高を確保",

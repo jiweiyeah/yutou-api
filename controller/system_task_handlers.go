@@ -28,7 +28,45 @@ func RegisterScheduledSystemTasks() {
 	// ===== CUSTOM START: keelcode token 自动续期 =====
 	service.RegisterSystemTaskHandler(keelcodeTokenRefreshHandler{})
 	// ===== CUSTOM END =====
+	// ===== CUSTOM START: atria key 池回收 =====
+	service.RegisterSystemTaskHandler(atriaKeyRecoveryHandler{})
+	// ===== CUSTOM END =====
 }
+
+// ===== CUSTOM START: atria key 池回收 =====
+
+// atriaKeyRecoveryHandler re-enables atria keys the upstream is willing to serve
+// again but that are still sitting in the auto-disabled state. Only status=3
+// keys are probed and only a 2xx probe re-enables one, so the job can never
+// disable a key and never overrules a manual (status=2) disable.
+type atriaKeyRecoveryHandler struct{}
+
+func (atriaKeyRecoveryHandler) Type() string { return model.SystemTaskTypeAtriaKeyRecovery }
+
+func (atriaKeyRecoveryHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("ATRIA_KEY_RECOVERY_TASK_ENABLED", true)
+}
+
+func (atriaKeyRecoveryHandler) Interval() time.Duration {
+	minutes := common.GetEnvOrDefault("ATRIA_KEY_RECOVERY_INTERVAL_MINUTES", 360)
+	if minutes < 1 {
+		minutes = 360
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (atriaKeyRecoveryHandler) NewPayload() any { return nil }
+
+func (atriaKeyRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunAtriaKeyRecovery(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// ===== CUSTOM END =====
 
 // ===== CUSTOM START: keelcode token 自动续期 =====
 
