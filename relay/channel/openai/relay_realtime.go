@@ -191,6 +191,11 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					localUsage.OutputTokenDetails.AudioTokens += audioToken
 				}
 
+				// ===== CUSTOM START: 上游 id 里的节点地址无条件清洗 =====
+				// 这一路不经过 `c.Writer`，所以 relay/common/response_model.go 里
+				// 那个 writer 盖不到它（见 relay/common/response_id.go）。
+				message = relaycommon.ScrubUpstreamIds(message)
+				// ===== CUSTOM END =====
 				if responseModel != nil {
 					message = responseModel.Rewrite(message)
 				}

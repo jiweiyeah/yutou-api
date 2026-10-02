@@ -73,20 +73,36 @@ func (r *ResponseModelRewriter) Rewrite(data []byte) []byte {
 // WrapResponseModelWriter is called per relay attempt so a retry uses the
 // selected channel's setting. Disabled channels keep their original writer.
 // requestModel must be captured before mapping or billing suffix normalization.
+//
+// ===== CUSTOM START: 上游 id 里的节点地址无条件清洗（见 response_id.go） =====
+// 两个改写共用一个 writer，但触发条件不同：
+//   - 模型名改写只在渠道开了 `response_model_name` 时生效（`rewriter` 为 nil 即关闭）；
+//   - 上游 `id` 里的节点地址清洗**无条件生效**——它跟那个渠道开关无关，关掉开关的
+//     渠道一样会把上游内网地址发给调用方。所以 writer 一律装上。
+//
+// Realtime 不包：那条链路不写 `c.Writer`，上游消息由 `relay_realtime.go` 自己逐条
+// 处理（那里另外调 `ScrubUpstreamIds`）；而且连接已被 hijack，一个按 Content-Type
+// 猜模式、按 SSE 事件攒帧的 writer 套在它上面没有意义。
 func WrapResponseModelWriter(c *gin.Context, requestModel string, format types.RelayFormat) func() {
-	setting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
-	if !setting.ResponseModelName || requestModel == "" || format == types.RelayFormatOpenAIRealtime {
+	if format == types.RelayFormatOpenAIRealtime {
 		return func() {}
 	}
+
+	var rewriter *ResponseModelRewriter
+	if setting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); setting.ResponseModelName && requestModel != "" {
+		rewriter = NewResponseModelRewriter(requestModel, format)
+	}
+	// ===== CUSTOM END =====
+
 	original := c.Writer
 	writer := &responseModelWriter{
 		ResponseWriter: original,
-		rewriter:       NewResponseModelRewriter(requestModel, format),
+		rewriter:       rewriter,
 	}
 	c.Writer = writer
 	return func() {
 		if err := writer.finish(); err != nil {
-			logger.LogWarn(c, "failed to finish response model rewrite: "+err.Error())
+			logger.LogWarn(c, "failed to finish response rewrite: "+err.Error())
 		}
 		c.Writer = original
 	}
@@ -94,6 +110,9 @@ func WrapResponseModelWriter(c *gin.Context, requestModel string, format types.R
 
 // responseModelWriter handles all HTTP adapter output, including direct c.JSON
 // and c.Writer writes. SSE buffering ends at each event, never at stream EOF.
+//
+// ===== CUSTOM START: 多一路 id 清洗（`rewriter` 可以为 nil，清洗那一路永远在跑） =====
+// ===== CUSTOM END =====
 type responseModelWriter struct {
 	gin.ResponseWriter
 	rewriter *ResponseModelRewriter
@@ -101,6 +120,19 @@ type responseModelWriter struct {
 	pending  []byte
 	mode     string
 }
+
+// ===== CUSTOM START: id 清洗与模型名改写共用一条改写路径 =====
+// rewritePayload 依次过 id 清洗与模型名改写。两者改的是不同字段，顺序无关；
+// 区别在于清洗无条件执行，改写器只在渠道开了 `response_model_name` 时存在。
+func (w *responseModelWriter) rewritePayload(payload []byte) []byte {
+	updated := ScrubUpstreamIds(payload)
+	if w.rewriter != nil {
+		updated = w.rewriter.Rewrite(updated)
+	}
+	return updated
+}
+
+// ===== CUSTOM END =====
 
 func (w *responseModelWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
@@ -113,6 +145,9 @@ func (w *responseModelWriter) Write(data []byte) (int, error) {
 		encoding := w.Header().Get("Content-Encoding")
 		switch {
 		case w.Status() < 200 || w.Status() >= 300 || (encoding != "" && encoding != "identity"):
+			// CUSTOM: 非 2xx 与压缩过的响应原样透传，**不改写**：解压再压回去的成本与
+			// 风险都不值得，而且错误体里本来也没有协议 id。代价是上游若给 200 的响应
+			// 加了 Content-Encoding，那一份不会被清洗——中继不应主动向上游请求压缩。
 			w.mode = "passthrough"
 		case strings.HasPrefix(contentType, "text/event-stream"):
 			w.mode = "sse"
@@ -137,7 +172,7 @@ func (w *responseModelWriter) Write(data []byte) (int, error) {
 				return len(data), nil
 			}
 		}
-		_, err := w.ResponseWriter.Write(w.rewriter.Rewrite(body))
+		_, err := w.ResponseWriter.Write(w.rewritePayload(body)) // CUSTOM: 兼做 id 清洗
 		w.pending = nil
 		if err != nil {
 			return 0, err
@@ -184,7 +219,7 @@ func (w *responseModelWriter) rewriteEvent(event []byte) []byte {
 	if dataLines == 0 {
 		return event
 	}
-	updated := w.rewriter.Rewrite(payload)
+	updated := w.rewritePayload(payload) // CUSTOM: 兼做 id 清洗
 	if bytes.Equal(updated, payload) {
 		return event
 	}
