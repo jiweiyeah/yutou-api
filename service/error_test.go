@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	// ===== CUSTOM START: 自动禁用关键词/上游 body 相关测试依赖 =====
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"github.com/QuantumNous/new-api/types"
+	// ===== CUSTOM END =====
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +55,6 @@ func TestResetStatusCode(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -124,6 +125,7 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
+// ===== CUSTOM START: DeepSeek 免费额度错误码识别测试 =====
 func TestRelayErrorHandlerKeepsTopLevelOpenAIErrorCode(t *testing.T) {
 	body := `{"message":"free allowance exhausted","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}`
 	resp := &http.Response{
@@ -137,6 +139,8 @@ func TestRelayErrorHandlerKeepsTopLevelOpenAIErrorCode(t *testing.T) {
 	require.Equal(t, DeepSeekFreeTierLimitCode, newAPIError.GetErrorCode())
 	require.Equal(t, "free allowance exhausted", newAPIError.Error())
 }
+
+// ===== CUSTOM END =====
 
 func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
 	withDebugEnabled(t, true)
@@ -176,6 +180,7 @@ func withDebugEnabled(t *testing.T, enabled bool) {
 	})
 }
 
+// ===== CUSTOM START: 上游 body 保留与自动禁用关键词匹配测试 =====
 func TestRelayErrorHandlerRetainsUpstreamBodyForNonJSON(t *testing.T) {
 	body := "Braintrust gateway error: Braintrust model 'glm-5.3-flash' unauthorized, insufficient credit balance"
 	resp := &http.Response{
@@ -236,3 +241,5 @@ func TestShouldDisableChannelMatchesKeywordsInUpstreamBody(t *testing.T) {
 		require.False(t, ShouldDisableChannel(apiErr))
 	})
 }
+
+// ===== CUSTOM END =====

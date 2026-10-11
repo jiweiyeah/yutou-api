@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/stretchr/testify/require"
 )
@@ -397,7 +397,8 @@ func TestCodexLiteStreamRewriterRewritesExecEvents(t *testing.T) {
 	require.Equal(t, codexLiteOutputCustomCall, emitted[1].Item.Type)
 	require.Nil(t, emitted[1].Item.Arguments)
 	require.Equal(t, "console.log('hi');", emitted[2].Delta)
-	require.Equal(t, "console.log('hi');", emitted[3].Input, ".done 事件必须带最终 input")
+	require.NotNil(t, emitted[3].Input, ".done 事件必须带最终 input")
+	require.Equal(t, "console.log('hi');", *emitted[3].Input)
 	require.Equal(t, codexLiteOutputCustomCall, emitted[4].Item.Type)
 	require.JSONEq(t, `"console.log('hi');"`, string(emitted[4].Item.Input))
 	require.Equal(t, codexLiteOutputCustomCall, emitted[5].Response.Output[0].Type)

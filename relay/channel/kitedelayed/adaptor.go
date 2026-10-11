@@ -13,7 +13,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -21,9 +20,10 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/service/relayconvert"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/sjson"
@@ -211,7 +211,6 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		info.IsStream = clientRequestedStream
 	}()
 
-	info.UpstreamRequestBodySize = int64(len(requestJSON))
 	var submitBody []byte
 	attemptedKeys := map[string]struct{}{info.ApiKey: {}}
 	for submitAttempt := 0; ; submitAttempt++ {
@@ -498,7 +497,6 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
-	info.UpstreamRequestBodySize = int64(len(requestJSON))
 	resp, err := a.doJSONRequest(c, info, upstreamCtx, http.MethodPost, requestURL, bytes.NewReader(requestJSON))
 	if err != nil {
 		// 客户端断开（心跳写失败会 cancel 掉 upstreamCtx）不是渠道故障：既不能回落到
@@ -709,9 +707,9 @@ func (a *Adaptor) doJSONRequest(
 	if req.Body == nil {
 		req.Body = http.NoBody
 	}
-	if body != nil && info.UpstreamRequestBodySize > 0 {
-		req.ContentLength = info.UpstreamRequestBodySize
-	}
+	// CUSTOM: 与 api_request.go 同源——BodyStorage/ReplayableBody 的长度
+	// net/http 猜不出来，交给上游的元数据回填统一处理。
+	channel.ApplyUpstreamBodyMetadata(req, body)
 
 	headers := req.Header
 	if err := a.SetupRequestHeader(c, &headers, info); err != nil {

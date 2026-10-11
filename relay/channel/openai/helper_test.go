@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,7 @@ func TestProcessTokenData_UnknownModeCountsChatStreamText(t *testing.T) {
 	for _, relayMode := range []int{relayconstant.RelayModeChatCompletions, relayconstant.RelayModeUnknown} {
 		var builder strings.Builder
 		toolCount := 0
-		err := processTokenData(relayMode, chunk, &builder, &toolCount)
+		err := processTokenData(&relaycommon.RelayInfo{RelayMode: relayMode}, chunk, &builder, &toolCount)
 		require.NoError(t, err)
 		assert.Equal(t, "PONG", builder.String(), "relayMode=%d", relayMode)
 	}
@@ -30,7 +31,7 @@ func TestProcessTokenData_UnknownModeCountsReasoningAndToolCalls(t *testing.T) {
 
 	var builder strings.Builder
 	toolCount := 0
-	require.NoError(t, processTokenData(relayconstant.RelayModeUnknown, chunk, &builder, &toolCount))
+	require.NoError(t, processTokenData(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeUnknown}, chunk, &builder, &toolCount))
 	assert.Equal(t, `think f{"a":1}`, builder.String())
 	assert.Equal(t, 1, toolCount)
 }
@@ -40,13 +41,13 @@ func TestProcessTokenData_CompletionsModeUnchanged(t *testing.T) {
 
 	var builder strings.Builder
 	toolCount := 0
-	require.NoError(t, processTokenData(relayconstant.RelayModeCompletions, chunk, &builder, &toolCount))
+	require.NoError(t, processTokenData(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeCompletions}, chunk, &builder, &toolCount))
 	assert.Equal(t, "hello", builder.String())
 }
 
 func TestProcessTokenData_UnknownModePropagatesBadJSON(t *testing.T) {
 	var builder strings.Builder
 	toolCount := 0
-	assert.Error(t, processTokenData(relayconstant.RelayModeUnknown, "not-json", &builder, &toolCount))
+	assert.Error(t, processTokenData(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeUnknown}, "not-json", &builder, &toolCount))
 	assert.Empty(t, builder.String())
 }

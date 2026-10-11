@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/gin-gonic/gin"
 )
@@ -642,7 +642,7 @@ func (r *codexLiteStreamRewriter) rewrite(event dto.ResponsesStreamResponse) []d
 		done.Type = codexLiteEventInputDone
 		done.Delta = ""
 		// .done 事件按官方形态带最终 input，客户端两种累加方式都能取到内容。
-		done.Input = source
+		done.Input = common.GetPointer(source)
 		return []dto.ResponsesStreamResponse{delta, done}
 
 	case codexLiteEventCompleted:

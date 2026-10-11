@@ -75,13 +75,37 @@ func ChannelType2APIType(channelType int) (int, bool) {
 		apiType = constant.APITypeReplicate
 	case constant.ChannelTypeCodex:
 		apiType = constant.APITypeCodex
-	case constant.ChannelTypeAdvancedCustom:
+	case constant.ChannelTypeAdvancedCustom, constant.ChannelTypeVLLM, constant.ChannelTypeSGLang:
 		apiType = constant.APITypeAdvancedCustom
+	case constant.ChannelTypeSub2API:
+		apiType = constant.APITypeSub2API
+	case constant.ChannelTypeNewAPI:
+		apiType = constant.APITypeNewAPI
+	// ===== CUSTOM START: kitedelayed 自建渠道映射到自建 API type =====
 	case constant.ChannelTypeKiteDelayed:
 		apiType = constant.APITypeKiteDelayed
+		// ===== CUSTOM END =====
 	}
 	if apiType == -1 {
+		// Task plugin channels are served by the task relay and must never
+		// fall back to the OpenAI adaptor.
+		if channelType == constant.ChannelTypeTaskPlugin {
+			return -1, false
+		}
 		return constant.APITypeOpenAI, false
 	}
 	return apiType, true
+}
+
+func SupportsResponsesCompact(channelType, apiType int) bool {
+	switch apiType {
+	case constant.APITypeOpenAI,
+		constant.APITypeCodex,
+		constant.APITypeAdvancedCustom,
+		constant.APITypeSub2API,
+		constant.APITypeNewAPI:
+		return true
+	default:
+		return false
+	}
 }

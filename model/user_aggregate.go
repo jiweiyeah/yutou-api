@@ -161,7 +161,10 @@ func applyUserFilters(query *gorm.DB, keyword, group string, role, status *int, 
 // queryUsers 是用户列表的统一查询入口，支持现有筛选 + 订阅状态过滤 + 累计充值排序。
 // 展示用的汇总值（累计充值/实付/订阅到期）仍由分页后的 attachUserAggregates 回填，
 // 排序键与展示值同源同口径。
-func queryUsers(keyword, group string, role, status *int, subStatus, orderBy, orderDir string, startIdx, num int) (users []*User, total int64, err error) {
+//
+// sortOptions 是上游的列排序（users 表自身列），orderBy 是累计充值排序（需 JOIN 聚合表）。
+// 两者互斥：orderBy 命中时优先，否则用 sortOptions。
+func queryUsers(keyword, group string, role, status *int, subStatus, orderBy, orderDir string, startIdx, num int, sortOptions ...UserSortOptions) (users []*User, total int64, err error) {
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -211,6 +214,10 @@ func queryUsers(keyword, group string, role, status *int, subStatus, orderBy, or
 		dataTx = dataTx.Order("(COALESCE(t.sum_amount, 0) * " + qpu + " + COALESCE(r.sum_quota, 0)) " + dir)
 		// 追加稳定次级键，避免相同累计充值时翻页重复/漏。
 		dataTx = dataTx.Order("users.id DESC")
+	} else if len(sortOptions) > 0 {
+		// 上游列排序：users 表自身列，无需 JOIN。Apply 内部对非 id 列追加 id 次级键，
+		// 保证翻页稳定。
+		dataTx = resolveUserSortOptions(sortOptions).Apply(dataTx)
 	} else {
 		dataTx = dataTx.Order("users.id DESC")
 	}

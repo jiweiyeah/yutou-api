@@ -56,11 +56,19 @@ const (
 	ChannelTypeReplicate      = 56
 	ChannelTypeCodex          = 57
 	ChannelTypeAdvancedCustom = 58
-	ChannelTypeKiteDelayed    = 59
-	ChannelTypeDummy          // this one is only for count, do not add any channel after this
+	// ===== CUSTOM START: kitedelayed 自建渠道类型（生产已有 type=59 的渠道，数值不可改）=====
+	ChannelTypeKiteDelayed = 59
+	// ===== CUSTOM END =====
+	ChannelTypeSub2API    = 60
+	ChannelTypeNewAPI     = 61
+	ChannelTypeTaskPlugin = 62
+	ChannelTypeVLLM       = 63
+	ChannelTypeSGLang     = 64
+	ChannelTypeDummy      // this one is only for count, do not add any channel after this
 
 )
 
+// ===== CUSTOM START: kitedelayed 选路标记 =====
 // KiteDelayedRouterMarker 是 Kite Delayed 渠道 base_url 上的后缀标记：带上它走
 // gokite 的 Kite Router 线，不带则走 Marathon 线。它只用于选路，不是上游的真实路径
 // —— 任何拿这个渠道的 base_url 去拼 host 级端点（如 /v1/credits）的地方都必须先
@@ -69,6 +77,9 @@ const (
 // 不能反向依赖它。
 const KiteDelayedRouterMarker = "/kite-router"
 
+// ===== CUSTOM END =====
+// ChannelBaseURLs 保存各渠道类型的内置默认 Base URL。
+// 非空值会通过 /api/channel/default_base_urls 下发到前端，作为渠道表单的 API 地址占位提示。
 var ChannelBaseURLs = []string{
 	"",                                    // 0
 	"https://api.openai.com",              // 1
@@ -129,7 +140,21 @@ var ChannelBaseURLs = []string{
 	"https://api.replicate.com",                 //56
 	"https://chatgpt.com",                       //57
 	"",                                          //58
+	// ===== CUSTOM START: kitedelayed 默认 base url =====
 	"https://delayed-inference.prod.gokite.ai", //59
+	// ===== CUSTOM END =====
+	"", //60
+	"", //61
+	"", //62
+	"", //63
+	"", //64
+}
+
+func GetChannelBaseURL(channelType int) string {
+	if channelType < 0 || channelType >= len(ChannelBaseURLs) {
+		return ""
+	}
+	return ChannelBaseURLs[channelType]
 }
 
 var ChannelTypeNames = map[int]string{
@@ -183,12 +208,19 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeJimeng:         "Jimeng",
 	ChannelTypeVidu:           "Vidu",
 	ChannelTypeSubmodel:       "Submodel",
-	ChannelTypeDoubaoVideo:    "DoubaoVideo",
+	ChannelTypeDoubaoVideo:    "Doubao",
 	ChannelTypeSora:           "Sora",
 	ChannelTypeReplicate:      "Replicate",
 	ChannelTypeCodex:          "ChatGPT Subscription (Codex)",
 	ChannelTypeAdvancedCustom: "Advanced Custom",
-	ChannelTypeKiteDelayed:    "Kite Delayed",
+	// ===== CUSTOM START: kitedelayed 渠道名 =====
+	ChannelTypeKiteDelayed: "Kite Delayed",
+	// ===== CUSTOM END =====
+	ChannelTypeSub2API:    "Sub2API",
+	ChannelTypeNewAPI:     "New API",
+	ChannelTypeTaskPlugin: "Task Plugin",
+	ChannelTypeVLLM:       "vLLM",
+	ChannelTypeSGLang:     "SGLang",
 }
 
 func GetChannelTypeName(channelType int) string {
@@ -220,4 +252,14 @@ var ChannelSpecialBases = map[string]ChannelSpecialBase{
 		ClaudeBaseURL: "https://ark.cn-beijing.volces.com/api/coding",
 		OpenAIBaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
 	},
+}
+
+// IsAdvancedCustomChannel includes named channels backed by route presets.
+func IsAdvancedCustomChannel(channelType int) bool {
+	switch channelType {
+	case ChannelTypeAdvancedCustom, ChannelTypeVLLM, ChannelTypeSGLang:
+		return true
+	default:
+		return false
+	}
 }

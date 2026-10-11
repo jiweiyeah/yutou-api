@@ -2,8 +2,9 @@ package controller
 
 import (
 	"context"
+	// ===== CUSTOM START: 自定义系统任务用 errors.Join 汇总多路错误 =====
 	"errors"
-	"fmt"
+	// ===== CUSTOM END =====
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -310,6 +311,6 @@ func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status mod
 		errorMessage = runErr.Error()
 	}
 	if err := model.FinishSystemTask(task.TaskID, runnerID, status, result, errorMessage); err != nil {
-		common.SysLog(fmt.Sprintf("system task %s failed to persist result: %v", task.TaskID, err))
+		common.SysLog(common.LogText("system task %s failed to persist result: %v", task.TaskID, err))
 	}
 }

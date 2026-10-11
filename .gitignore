@@ -1,4 +1,5 @@
 .idea
+.review
 .vscode
 .zed
 .history
@@ -7,11 +8,11 @@ upload
 *.db
 build
 *.db-journal
+*.db-shm
+*.db-wal
 logs
-web/default/dist
-web/classic/dist
-web/node_modules
 web/dist
+web/node_modules
 .env
 one-api
 new-api
@@ -22,13 +23,13 @@ tiktoken_cache
 .gocache
 .gomodcache/
 .cache
-plans
+.plans
 .claude
 .cursor
 
 electron/node_modules
 electron/dist
-data/
+/data/
 .gomodcache/
 .gocache-temp
 .gopath
@@ -37,6 +38,7 @@ token_estimator_test.go
 skills-lock.json
 .playwright-mcp
 
+# ===== CUSTOM START: 本地密钥/凭证/临时产物不入库 =====
 # Python
 __pycache__/
 *.pyc
@@ -49,10 +51,13 @@ bin/channel_result.txt
 
 # Local-only live probes and scratch test workspaces.
 .local-tests/
-service/relayconvert/chat_responses_live_local_test.go
+relaykit/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 
 # Local deployment credentials, backups, and session-analysis scratch files.
 .tmp_DEPLOY_SSH_KEY
 .tmp_parse_codex.py
 one-api.db.bak.*
+# ===== CUSTOM END =====
+go.work
+go.work.sum
