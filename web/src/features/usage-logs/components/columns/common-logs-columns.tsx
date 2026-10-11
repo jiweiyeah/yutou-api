@@ -22,6 +22,9 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { GroupBadge } from '@/components/group-badge'
+// ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import {
@@ -346,6 +349,9 @@ export function useCommonLogsColumns(
   showBillingSource = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  const isRoleAdmin = useIsAdmin()
+  // ===== CUSTOM END =====
   const currency = useSystemConfigStore((state) => state.config.currency)
   return useMemo(() => {
     const columns: ColumnDef<UsageLog>[] = [
@@ -382,7 +388,8 @@ export function useCommonLogsColumns(
       },
     ]
 
-    if (isAdmin) {
+    // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+    if (isRoleAdmin) {
       columns.push(
         {
           id: 'channel',
@@ -544,6 +551,12 @@ export function useCommonLogsColumns(
             )
           },
         },
+      )
+    }
+    // ===== CUSTOM END =====
+
+    if (isAdmin) {
+      columns.push(
         {
           id: 'user',
           header: t('User'),
@@ -803,7 +816,11 @@ export function useCommonLogsColumns(
         },
       },
 
-      {
+    )
+
+    // ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+    if (isRoleAdmin) {
+      columns.push({
         accessorKey: 'content',
         header: t('Details'),
         cell: function DetailsCell({ row }) {
@@ -888,11 +905,12 @@ export function useCommonLogsColumns(
         },
         size: 180,
         maxSize: 200,
-      }
-    )
+      })
+    }
+    // ===== CUSTOM END =====
 
     return columns
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, isAdmin, isRoot, showBillingSource, currency])
+  }, [t, isAdmin, isRoot, showBillingSource, currency, isRoleAdmin])
 }

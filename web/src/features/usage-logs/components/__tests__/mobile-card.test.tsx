@@ -26,6 +26,11 @@ import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 
+// ===== CUSTOM START: 渠道列/详情列按真实角色判断，测试需给出管理员登录态 =====
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
+// ===== CUSTOM END =====
+
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
@@ -83,7 +88,12 @@ function Fixture(props: {
   )
 }
 
-function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
+function renderLogs(
+  props: Parameters<typeof Fixture>[0] = {},
+  role: number = ROLE.ADMIN
+) {
+  // 渠道列按真实角色门控，测试断言的是列内容，默认给出管理员身份。
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'tester', role })
   return render(
     <QueryClientProvider
       client={
@@ -206,10 +216,14 @@ it('hides sensitive names and disables full-text inspection when privacy is enab
 })
 
 it('respects hidden columns and omits admin fields in the self view', () => {
-  renderLogs({
-    admin: false,
-    visibility: { token_name: false, model_name: false },
-  })
+  // 渠道列按真实角色门控，self view 的普通用户看不到任何管理字段。
+  renderLogs(
+    {
+      admin: false,
+      visibility: { token_name: false, model_name: false },
+    },
+    ROLE.USER
+  )
   expect(
     screen.queryByRole('button', {
       name: /Channel:|User:|Token:|Group:|Model:/,

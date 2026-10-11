@@ -274,3 +274,63 @@ it('refreshes history when the last running task finishes', async () => {
   expect(screen.getByText('history-runner')).toBeVisible()
   client.clear()
 })
+
+// ===== CUSTOM START: 任务运行详情弹框 =====
+// 表格只展示 error，成功的任务详情列永远是空的；弹框按需展开
+// result / state / payload，这里锁住这个契约。
+it('opens a detail dialog with the recorded run result, progress and payload', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (_url, config) => {
+    const data = [
+      {
+        ...task,
+        status: 'succeeded',
+        result: { added: 3, removed: 1 },
+        state: { progress: 100 },
+        payload: { source: 'manual' },
+      },
+    ]
+    return {
+      data: {
+        success: true,
+        data: config?.params?.scope === 'active' ? [] : data,
+        total: data.length,
+      },
+    }
+  })
+  const client = renderPanel()
+
+  await userEvent.click(await screen.findByRole('button', { name: 'View' }))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText('Result')).toBeVisible()
+  expect(within(dialog).getByText('added')).toBeVisible()
+  expect(within(dialog).getByText('source')).toBeVisible()
+  expect(within(dialog).getByText('manual')).toBeVisible()
+  expect(
+    within(dialog).queryByText('This task did not record any detail.')
+  ).not.toBeInTheDocument()
+  client.clear()
+})
+
+it('states plainly when a task recorded no detail at all', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (_url, config) => {
+    const data = [{ ...task, status: 'succeeded' }]
+    return {
+      data: {
+        success: true,
+        data: config?.params?.scope === 'active' ? [] : data,
+        total: data.length,
+      },
+    }
+  })
+  const client = renderPanel()
+
+  await userEvent.click(await screen.findByRole('button', { name: 'View' }))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(
+    within(dialog).getByText('This task did not record any detail.')
+  ).toBeVisible()
+  client.clear()
+})
+// ===== CUSTOM END =====

@@ -23,6 +23,10 @@ import type { ColumnDef } from '@tanstack/react-table'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+// ===== CUSTOM START: 详情列与渠道列仅对 root/管理员展示 =====
+import { useIsAdmin } from '@/hooks/use-admin'
+// ===== CUSTOM END =====
+
 import { StatusBadge } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
@@ -88,6 +92,9 @@ export function useTaskLogsColumns(
   isRoot: boolean
 ): ColumnDef<TaskLog>[] {
   const { t } = useTranslation()
+  // ===== CUSTOM START: 详情列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+  const isRoleAdmin = useIsAdmin()
+  // ===== CUSTOM END =====
   return useMemo(() => {
     const columns: ColumnDef<TaskLog>[] = [
       {
@@ -116,9 +123,14 @@ export function useTaskLogsColumns(
       },
     ]
 
+    // ===== CUSTOM START: 渠道列仅对 root/管理员展示（按角色判断，不受视图范围影响） =====
+    if (isRoleAdmin) {
+      columns.push(createChannelColumn<TaskLog>({ headerLabel: t('Channel') }))
+    }
+    // ===== CUSTOM END =====
+
     if (isAdmin) {
       columns.push(
-        createChannelColumn<TaskLog>({ headerLabel: t('Channel') }),
         {
           id: 'user',
           header: t('User'),
@@ -259,8 +271,12 @@ export function useTaskLogsColumns(
         ),
         size: 120,
         maxSize: 140,
-      },
-      {
+      }
+    )
+
+    // ===== CUSTOM START: 详情列仅对 root/管理员展示 =====
+    if (isRoleAdmin) {
+      columns.push({
         accessorKey: 'fail_reason',
         header: t('Details'),
         cell: ({ row }) => (
@@ -273,9 +289,10 @@ export function useTaskLogsColumns(
         ),
         size: 220,
         maxSize: 240,
-      }
-    )
+      })
+    }
+    // ===== CUSTOM END =====
 
     return columns
-  }, [t, isAdmin, isRoot])
+  }, [t, isAdmin, isRoot, isRoleAdmin])
 }

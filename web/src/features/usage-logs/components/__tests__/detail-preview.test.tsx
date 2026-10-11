@@ -22,12 +22,23 @@ import {
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import en from '@/i18n/locales/en.json'
+// ===== CUSTOM START: 渠道列/详情列按真实角色判断，测试需给出管理员登录态 =====
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
+// ===== CUSTOM END =====
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -108,6 +119,8 @@ beforeEach(async () => {
   useSystemConfigStore
     .getState()
     .setConfig({ currency: { ...DEFAULT_CURRENCY_CONFIG } })
+  // 渠道列/详情列按真实角色门控，测试断言的是列内容，需给出管理员身份。
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   client.setQueryData(['status'], {}, { updatedAt: Date.now() + 60_000 })
   client.setQueryData(
@@ -117,7 +130,11 @@ beforeEach(async () => {
   )
 })
 afterEach(() => {
+  // 先卸载再重置登录态：详情列按真实角色门控，
+  // 组件若仍挂载会因 content 列消失而抛错。
+  cleanup()
   client.clear()
+  useAuthStore.getState().auth.setUser(null)
   useSystemConfigStore.getState().setConfig(previousConfig)
 })
 function renderPreview(other: LogOtherData, isAdmin = true, type?: number) {

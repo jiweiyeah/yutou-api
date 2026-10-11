@@ -21,7 +21,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ActivityTimeCell } from '@/components/activity-time-cell'
-import { BadgeCell } from '@/components/data-table'
+import { BadgeCell, DataTableColumnHeader } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { LongText } from '@/components/long-text'
 import { StatusBadge } from '@/components/status-badge'
@@ -33,7 +33,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { getCurrencyDisplay } from '@/lib/currency'
-import { formatQuota } from '@/lib/format'
+import { formatNumber, formatQuota, formatTimestamp } from '@/lib/format'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
@@ -194,6 +194,89 @@ export function useUsersColumns(): ColumnDef<User>[] {
         minSize: 160,
         meta: { mobileOrder: 40 },
       },
+      // ===== CUSTOM START: admin user-list aggregates (topup + subscription) =====
+      {
+        id: 'total_topup',
+        accessorKey: 'total_topup_quota',
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t('Total Top-up')} />
+        ),
+        cell: ({ row }) => {
+          const quota = (row.original.total_topup_quota ?? 0) as number
+          const money = (row.original.total_topup_money ?? 0) as number
+          if (quota <= 0 && money <= 0) {
+            return (
+              <StatusBadge
+                label={t('No Top-up')}
+                variant='neutral'
+                copyable={false}
+              />
+            )
+          }
+          return (
+            <div className='flex flex-col gap-0.5'>
+              <span className='font-medium tabular-nums'>
+                {formatQuota(quota)}
+              </span>
+              {money > 0 && (
+                <span className='text-muted-foreground text-xs tabular-nums'>
+                  {formatNumber(money)} {t('paid')}
+                </span>
+              )}
+            </div>
+          )
+        },
+        enableSorting: true,
+        meta: { label: t('Total Top-up') },
+      },
+      {
+        id: 'subscription',
+        accessorKey: 'sub_active',
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t('Subscription')} />
+        ),
+        cell: ({ row }) => {
+          const active = Boolean(row.original.sub_active)
+          const endTime = row.original.sub_end_time
+          if (!active) {
+            return (
+              <StatusBadge
+                label={t('No Subscription')}
+                variant='neutral'
+                copyable={false}
+              />
+            )
+          }
+          return (
+            <Tooltip>
+              <TooltipTrigger render={<div className='cursor-help' />}>
+                <StatusBadge
+                  label={t('Subscribed')}
+                  variant='success'
+                  copyable={false}
+                />
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className='text-xs'>
+                  {t('Expires At')}: {endTime ? formatTimestamp(endTime) : '-'}
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          )
+        },
+        filterFn: (row, _id, value) => {
+          // value is ['active'] or ['none'] from toolbar filter
+          // Server already filtered, but TanStack Table needs client filterFn to match
+          const subActive = Boolean(row.original.sub_active)
+          const filterValue = value[0] // 'active' or 'none'
+          if (filterValue === 'active') return subActive
+          if (filterValue === 'none') return !subActive
+          return true // no filter
+        },
+        enableSorting: false,
+        meta: { label: t('Subscription') },
+      },
+      // ===== CUSTOM END =====
       {
         accessorKey: 'group',
         header: t('User Group'),

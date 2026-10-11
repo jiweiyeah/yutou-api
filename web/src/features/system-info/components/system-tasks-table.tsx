@@ -16,9 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Eye } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable } from '@/components/data-table'
+import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import {
@@ -36,7 +39,10 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampRelative, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { SYSTEM_TASK_TYPE_LABEL } from '../constants'
+import { SYSTEM_TASK_TYPE_LABEL, TYPE_DISPLAY_ID } from '../constants'
+// ===== CUSTOM START: 任务运行详情弹框 =====
+import { TaskDetailDialog } from './task-detail-dialog'
+// ===== CUSTOM END =====
 
 const STATUS_VARIANT: Record<SystemTaskStatus, 'secondary' | 'destructive'> = {
   pending: 'secondary',
@@ -69,10 +75,6 @@ const PROGRESS_BAR_CLASS_NAME: Record<SystemTaskStatus, string> = {
   failed: '[&_[data-slot=progress-indicator]]:bg-destructive',
 }
 
-const TYPE_DISPLAY_ID: Record<string, string> = {
-  midjourney_poll: 'drawing_task_poll',
-}
-
 function getProgress(task: SystemTask): number | null {
   const progress = (task.state as { progress?: unknown } | undefined)?.progress
   if (typeof progress !== 'number' || Number.isNaN(progress)) return null
@@ -85,8 +87,12 @@ type SystemTasksTableProps = {
 
 export function SystemTasksTable(props: SystemTasksTableProps) {
   const { t, i18n } = useTranslation()
+  // ===== CUSTOM START: 任务运行详情弹框 =====
+  const [detailTask, setDetailTask] = useState<SystemTask | null>(null)
+  // ===== CUSTOM END =====
 
   return (
+    <>
     <StaticDataTable tableClassName='min-w-[900px]'>
       <TableHeader>
         <TableRow className='bg-muted/40 hover:bg-muted/40'>
@@ -162,16 +168,44 @@ export function SystemTasksTable(props: SystemTasksTableProps) {
                   toIntlLocale(i18n.language)
                 )}
               </TableCell>
-              <TableCell
-                className='text-destructive max-w-[220px] truncate py-3 pr-4 align-middle text-xs'
-                title={task.error || undefined}
-              >
-                {task.error || '-'}
+              {/* CUSTOM START: 详情列改为「查看」按钮 + 弹框 */}
+              <TableCell className='py-3 pr-4 align-middle'>
+                <div className='flex items-center gap-2'>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={() => setDetailTask(task)}
+                  >
+                    <Eye
+                      data-icon='inline-start'
+                      className='size-3.5'
+                      aria-hidden='true'
+                    />
+                    {t('View')}
+                  </Button>
+                  {task.error ? (
+                    <span
+                      className='text-destructive max-w-[130px] truncate text-xs'
+                      title={task.error}
+                    >
+                      {task.error}
+                    </span>
+                  ) : null}
+                </div>
               </TableCell>
+              {/* CUSTOM END */}
             </TableRow>
           )
         })}
       </TableBody>
     </StaticDataTable>
+      {/* CUSTOM START: 任务运行详情弹框 */}
+      <TaskDetailDialog
+        task={detailTask}
+        onOpenChange={(open) => !open && setDetailTask(null)}
+      />
+      {/* CUSTOM END */}
+    </>
   )
 }

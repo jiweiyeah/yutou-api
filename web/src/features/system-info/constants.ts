@@ -25,3 +25,9 @@ export const SYSTEM_TASK_TYPE_LABEL: Record<string, string> = {
   midjourney_poll: 'Drawing task polling',
   async_task_poll: 'Async task polling',
 }
+
+// ===== CUSTOM START: 任务详情弹框与表格共用的内部类型名 =====
+export const TYPE_DISPLAY_ID: Record<string, string> = {
+  midjourney_poll: 'drawing_task_poll',
+}
+// ===== CUSTOM END =====
