@@ -125,9 +125,11 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
-// ===== CUSTOM START: DeepSeek 免费额度错误码识别测试 =====
+// ===== CUSTOM START: 顶层 message/type/code 形态的上游错误识别测试 =====
+// 有些上游不把错误嵌在 "error" 对象里，而是把 message/type/code 平铺在顶层。
+// 这里锁定该形态仍能被解析成 OpenAI 形状的错误，并保留上游的 error code。
 func TestRelayErrorHandlerKeepsTopLevelOpenAIErrorCode(t *testing.T) {
-	body := `{"message":"free allowance exhausted","type":"free_tier_limit_reached","code":"free_tier_limit_reached"}`
+	body := `{"message":"upstream rejected the request","type":"invalid_request_error","code":"invalid_request_error"}`
 	resp := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
 		Body:       io.NopCloser(strings.NewReader(body)),
@@ -136,8 +138,8 @@ func TestRelayErrorHandlerKeepsTopLevelOpenAIErrorCode(t *testing.T) {
 	newAPIError := RelayErrorHandler(context.Background(), resp, false)
 
 	require.NotNil(t, newAPIError)
-	require.Equal(t, DeepSeekFreeTierLimitCode, newAPIError.GetErrorCode())
-	require.Equal(t, "free allowance exhausted", newAPIError.Error())
+	require.Equal(t, types.ErrorCode("invalid_request_error"), newAPIError.GetErrorCode())
+	require.Equal(t, "upstream rejected the request", newAPIError.Error())
 }
 
 // ===== CUSTOM END =====

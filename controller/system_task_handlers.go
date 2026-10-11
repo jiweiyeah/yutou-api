@@ -2,9 +2,6 @@ package controller
 
 import (
 	"context"
-	// ===== CUSTOM START: 自定义系统任务用 errors.Join 汇总多路错误 =====
-	"errors"
-	// ===== CUSTOM END =====
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -25,10 +22,6 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(kiteCreditsHandler{})
-	service.RegisterSystemTaskHandler(deepSeekFreeTierRecoveryHandler{})
-	// ===== CUSTOM START: keelcode token 自动续期 =====
-	service.RegisterSystemTaskHandler(keelcodeTokenRefreshHandler{})
-	// ===== CUSTOM END =====
 	// ===== CUSTOM START: atria key 池回收 =====
 	service.RegisterSystemTaskHandler(atriaKeyRecoveryHandler{})
 	// ===== CUSTOM END =====
@@ -68,85 +61,6 @@ func (atriaKeyRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, 
 }
 
 // ===== CUSTOM END =====
-
-// ===== CUSTOM START: keelcode token 自动续期 =====
-
-// keelcodeTokenRefreshHandler periodically renews keelcode access tokens that
-// are about to expire. keelcode tokens live ~7 days and an unexpired token can
-// mint its successor over plain HTTP, so the job refreshes any key whose ledger
-// entry expires within the lead window (default 48h) and swaps it into the
-// channel key list in place.
-type keelcodeTokenRefreshHandler struct{}
-
-func (keelcodeTokenRefreshHandler) Type() string {
-	return model.SystemTaskTypeKeelcodeTokenRefresh
-}
-
-func (keelcodeTokenRefreshHandler) Enabled() bool {
-	return common.GetEnvOrDefaultBool("KEELCODE_TOKEN_REFRESH_TASK_ENABLED", true)
-}
-
-func (keelcodeTokenRefreshHandler) Interval() time.Duration {
-	minutes := common.GetEnvOrDefault("KEELCODE_TOKEN_REFRESH_INTERVAL_MINUTES", 360)
-	if minutes < 1 {
-		minutes = 360
-	}
-	return time.Duration(minutes) * time.Minute
-}
-
-func (keelcodeTokenRefreshHandler) NewPayload() any { return nil }
-
-func (keelcodeTokenRefreshHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary, err := service.RunKeelcodeTokenRefresh(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	if err != nil {
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
-		return
-	}
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
-}
-
-// ===== CUSTOM END =====
-
-type deepSeekFreeTierRecoveryHandler struct{}
-
-func (deepSeekFreeTierRecoveryHandler) Type() string {
-	return model.SystemTaskTypeDeepSeekFreeTierRecovery
-}
-
-func (deepSeekFreeTierRecoveryHandler) Enabled() bool {
-	return common.GetEnvOrDefaultBool("DEEPSEEK_FREE_TIER_RECOVERY_TASK_ENABLED", true)
-}
-
-func (deepSeekFreeTierRecoveryHandler) Interval() time.Duration {
-	minutes := common.GetEnvOrDefault("DEEPSEEK_FREE_TIER_RECOVERY_INTERVAL_MINUTES", 360)
-	if minutes < 1 {
-		minutes = 360
-	}
-	return time.Duration(minutes) * time.Minute
-}
-
-func (deepSeekFreeTierRecoveryHandler) NewPayload() any { return nil }
-
-// freeTierRecoveryTaskSummary combines both halves of one recovery pass: the
-// DeepSeek keys restored after their free-tier reset window, and the
-// TokenHarbor pool re-probed against the upstream.
-type freeTierRecoveryTaskSummary struct {
-	DeepSeek    service.DeepSeekFreeTierRecoverySummary `json:"deepseek"`
-	TokenHarbor service.TokenHarborKeyScanSummary       `json:"tokenharbor"`
-}
-
-func (deepSeekFreeTierRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	report := service.NewSystemTaskProgressReporter(task, runnerID)
-	deepSeekSummary, deepSeekErr := service.RunDeepSeekFreeTierRecovery(ctx, report)
-	tokenHarborSummary, tokenHarborErr := service.RunTokenHarborKeyScan(ctx, report)
-
-	summary := freeTierRecoveryTaskSummary{DeepSeek: deepSeekSummary, TokenHarbor: tokenHarborSummary}
-	if err := errors.Join(deepSeekErr, tokenHarborErr); err != nil {
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
-		return
-	}
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
-}
 
 // kiteCreditsHandler periodically checks Kite Delayed credits and disables
 // keys that are at or below the configured safety threshold.

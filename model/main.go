@@ -338,6 +338,9 @@ func migrateDB() error {
 	if err := migrateOptionPrimaryKey(DB); err != nil {
 		common.SysError(common.LogText("failed to migrate options primary key: %s", err.Error()))
 	}
+	// ===== CUSTOM START: 清理已退役的 keelcode token 台账表 =====
+	dropLegacyKeelcodeTokenTable(DB)
+	// ===== CUSTOM END =====
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -376,9 +379,6 @@ func migrateDB() error {
 		&CasbinRule{},
 		&AuthzRole{},
 		&UserAccessToken{},
-		// ===== CUSTOM START: keelcode token 续期台账 =====
-		&KeelcodeToken{},
-		// ===== CUSTOM END =====
 	)
 	if err != nil {
 		return err

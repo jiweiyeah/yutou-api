@@ -180,16 +180,13 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/ratio_sync/fetch":                accessTokenScopeRule("option:write"),
 
 	// router/api-router.go: /api/performance, /api/system-task, /api/system-info
-	"GET /api/performance/stats":         accessTokenScopeRule("ops:read"),
-	"DELETE /api/performance/disk_cache": accessTokenScopeRule("ops:write"),
-	"POST /api/performance/reset_stats":  accessTokenScopeRule("ops:write"),
-	"POST /api/performance/gc":           accessTokenScopeRule("ops:write"),
-	"GET /api/performance/logs":          accessTokenScopeRule("ops:read"),
-	"DELETE /api/performance/logs":       accessTokenScopeRule("ops:write"),
-	"POST /api/system-task/log-cleanup":  accessTokenScopeRule("ops:write"),
-	// ===== CUSTOM START: DeepSeek 免费额度恢复任务 =====
-	"POST /api/system-task/free-tier-recovery": accessTokenScopeRule("ops:write"),
-	// ===== CUSTOM END =====
+	"GET /api/performance/stats":                   accessTokenScopeRule("ops:read"),
+	"DELETE /api/performance/disk_cache":           accessTokenScopeRule("ops:write"),
+	"POST /api/performance/reset_stats":            accessTokenScopeRule("ops:write"),
+	"POST /api/performance/gc":                     accessTokenScopeRule("ops:write"),
+	"GET /api/performance/logs":                    accessTokenScopeRule("ops:read"),
+	"DELETE /api/performance/logs":                 accessTokenScopeRule("ops:write"),
+	"POST /api/system-task/log-cleanup":            accessTokenScopeRule("ops:write"),
 	"GET /api/system-task/list":                    accessTokenScopeRule("ops:read"),
 	"DELETE /api/system-task/history":              accessTokenScopeRule("ops:write"),
 	"GET /api/system-task/current":                 accessTokenScopeRule("ops:read"),

@@ -319,9 +319,9 @@ git diff $BASE..custom -- path/to/file       # 找出我们原本的改动
 | 4 | Claude token 计数 | `controller/claude_count_tokens.go` | 无 | 评估是否被上游 `tokenkit` 覆盖，若是则退役 |
 | 5 | 限流绕过 | `common/custom_rate_limit_bypass.go`、`middleware/custom_rate_limit_bypass.go` | 无 | 保持；`middleware/rate-limit.go` 冲突处重接 |
 | 6 | 上游错误改写 | `service/error_rewrite.go`、`dto/channel_settings.go`、前端 `error-rewrite-editor.tsx` | 部分（`channel_error_rewrite` 相关类型在 `relaykit/dto`） | 类型来源改 `relaykit/dto` |
-| 7 | 系统任务 / Key 池 | `service/atria_key_recovery_task.go`、`kite_credits_task.go`、`tokenharbor_key_scan.go` | 无 | 保持；确认不依赖被插件化的内置 task adaptor |
-| 8 | keelcode token | `model/custom_keelcode_token.go`、`service/custom_keelcode_refresh.go` | 无 | 保持 |
-| 9 | DeepSeek 免费额度 | `service/deepseek_free_tier.go` | 无 | 保持 |
+| 7 | 系统任务 / Key 池 | `service/atria_key_recovery_task.go`、`kite_credits_task.go` | 无 | 保持；确认不依赖被插件化的内置 task adaptor |
+| 8 | ~~keelcode token~~ | ~~`model/custom_keelcode_token.go`、`service/custom_keelcode_refresh.go`~~ | 无 | **已退役**（2026-10-11 用户决定下线），`keelcode_tokens` 表由 `model/custom_keelcode_token_cleanup.go` 启动时删除 |
+| 9 | ~~DeepSeek 免费额度~~ | ~~`service/deepseek_free_tier.go`~~ | 无 | **已退役**（生产无 type=43 渠道，属死代码）；连带 `TokenHarbor key 扫描` 一并删除 |
 | 10 | 响应模型名 / 响应 ID 清洗 | `relay/common/response_model.go`、`relay/common/response_id.go` | 部分 | `response_model.go` 是高冲突文件，逐行合并 |
 | 11 | 用户聚合 | `model/user_aggregate.go` | 无 | 保持 |
 | 12 | CI / 部署 | `.github/workflows/custom-*.yml` | 无 | 保持；注意上游也改 `.github/workflows/` 下的自有文件 |

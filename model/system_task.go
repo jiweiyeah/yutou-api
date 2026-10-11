@@ -16,15 +16,13 @@ const (
 	SystemTaskStatusSucceeded SystemTaskStatus = "succeeded"
 	SystemTaskStatusFailed    SystemTaskStatus = "failed"
 
-	SystemTaskTypeLogCleanup               = "log_cleanup"
-	SystemTaskTypeChannelTest              = "channel_test"
-	SystemTaskTypeModelUpdate              = "model_update"
-	SystemTaskTypeMidjourneyPoll           = "midjourney_poll"
-	SystemTaskTypeAsyncTaskPoll            = "async_task_poll"
-	SystemTaskTypeKiteCredits              = "kite_credits"
-	SystemTaskTypeDeepSeekFreeTierRecovery = "deepseek_free_tier_recovery"
-	// ===== CUSTOM START: keelcode token 自动续期 =====
-	SystemTaskTypeKeelcodeTokenRefresh = "keelcode_token_refresh"
+	SystemTaskTypeLogCleanup     = "log_cleanup"
+	SystemTaskTypeChannelTest    = "channel_test"
+	SystemTaskTypeModelUpdate    = "model_update"
+	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
+	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
+	// ===== CUSTOM START: Kite Delayed 密钥余额扫描 =====
+	SystemTaskTypeKiteCredits = "kite_credits"
 	// ===== CUSTOM END =====
 	// ===== CUSTOM START: atria key 池回收 =====
 	SystemTaskTypeAtriaKeyRecovery = "atria_key_recovery"

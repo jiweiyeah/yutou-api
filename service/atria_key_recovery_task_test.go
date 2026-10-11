@@ -20,11 +20,11 @@ import (
 
 func TestAtriaProbeURL(t *testing.T) {
 	cases := map[string]string{
-		"https://api.atria-asi.ai":                    "https://api.atria-asi.ai/v1/chat/completions",
-		"https://api.atria-asi.ai/":                   "https://api.atria-asi.ai/v1/chat/completions",
-		"https://api.atria-asi.ai/v1":                 "https://api.atria-asi.ai/v1/chat/completions",
+		"https://api.atria-asi.ai":                     "https://api.atria-asi.ai/v1/chat/completions",
+		"https://api.atria-asi.ai/":                    "https://api.atria-asi.ai/v1/chat/completions",
+		"https://api.atria-asi.ai/v1":                  "https://api.atria-asi.ai/v1/chat/completions",
 		"https://api.atria-asi.ai/v1/chat/completions": "https://api.atria-asi.ai/v1/chat/completions",
-		"https://api.atria-asi.ai/prefix/v1/models":   "https://api.atria-asi.ai/prefix/v1/chat/completions",
+		"https://api.atria-asi.ai/prefix/v1/models":    "https://api.atria-asi.ai/prefix/v1/chat/completions",
 	}
 	for input, want := range cases {
 		got, err := atriaProbeURL(input)
@@ -49,12 +49,12 @@ func TestIsAtriaChannelMatchesOnlyProviderHost(t *testing.T) {
 	assert.True(t, IsAtriaChannel(channelWithBaseURL("https://ATRIA-ASI.AI")))
 
 	assert.False(t, IsAtriaChannel(channelWithBaseURL("https://atria-asi.ai.evil.example/v1")))
-	assert.False(t, IsAtriaChannel(channelWithBaseURL("https://tokenharbor.ai/v1")))
+	assert.False(t, IsAtriaChannel(channelWithBaseURL("https://gorouter.example/v1")))
 	assert.False(t, IsAtriaChannel(channelWithBaseURL("")))
 }
 
 func TestAtriaProbeModelPrefersOverrideThenMapping(t *testing.T) {
-	mapping := `{"deepseek/deepseek-v4-flash":"Atria-Dawn-Preview","tencent/hy3":"Atria-Dawn-Preview"}`
+	mapping := `{"vendor/model-a":"Atria-Dawn-Preview","tencent/hy3":"Atria-Dawn-Preview"}`
 	channel := &model.Channel{ModelMapping: &mapping}
 
 	t.Setenv("ATRIA_KEY_RECOVERY_PROBE_MODEL", "Atria-Custom")

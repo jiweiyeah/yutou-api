@@ -79,13 +79,6 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		return
 	}
 	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode())))
-
-	// ===== CUSTOM START: DeepSeek 免费额度耗尽按上游给的恢复时间临时禁用 =====
-	// 标注必须在 ShouldDisableChannel 之前，它把 provider 专属的额度耗尽错误变成
-	// 带截止时间的自动禁用信号（见 service/deepseek_free_tier.go）。
-	AnnotateDeepSeekFreeTierLimit(channelError.ChannelType, err)
-	// ===== CUSTOM END =====
-
 	if ShouldDisableChannel(err) && channelError.AutoBan {
 		// ===== CUSTOM START: 临时禁用支持（until>0 到期自动恢复）=====
 		if types.IsChannelAutoDisableError(err) {
