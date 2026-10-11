@@ -354,8 +354,9 @@ git diff $BASE..custom -- path/to/file       # 找出我们原本的改动
 - [x] 系统任务（`system_tasks`）能正常跑一轮
 - [x] `relay/channel/kitedelayed` 与 `advancedcustom` 渠道可正常调用
 - [x] 无标记文件已补 `CUSTOM START/END` 标记（见 §1.6；7 个 locale JSON 为已知例外）
-- [ ] 恢复 `custom-sync-upstream.yml` 的每周 `schedule`
-- [ ] **合并提交后**：`git checkout custom && git merge sync/upstream-20261011`
+- [x] 合并提交完成：`e27917637`（双亲 `da43dea92` + `0f38a14a5`），本地快进 `custom`
+- [x] `custom-sync-upstream.yml` 的每周 `schedule` **保持关闭**（2026-10-11 决定，仅手动 `workflow_dispatch`）
+- [ ] **推送 `origin/custom`** —— 待用户决定上线节奏
 - [ ] **生产部署需用户明确许可**（本次改动范围大，禁止未授权上线）
 
 ### 7.1 本地端到端验证记录（2026-10-11）
