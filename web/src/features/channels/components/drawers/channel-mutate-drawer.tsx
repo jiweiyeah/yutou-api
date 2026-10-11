@@ -323,6 +323,9 @@ const SENSITIVE_FORM_FIELDS = [
   // ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
   'error_rewrite',
   // ===== CUSTOM END =====
+  // ===== CUSTOM START: response_model_name 开关 =====
+  'response_model_name',
+  // ===== CUSTOM END =====
 ] satisfies (keyof ChannelFormValues)[]
 
 function parseSettingsRecord(
@@ -1982,8 +1985,38 @@ export function ChannelMutateDrawer({
     />
   )
 
-  const ollamaOpenAIChatFields = currentType === CHANNEL_TYPE_OLLAMA && (
+  // ===== CUSTOM START: response_model_name 开关 =====
+  // 所有渠道类型都可用：开启后响应体（JSON 与流式）里的 model 字段回显客户端
+  // 请求的模型名，而不是上游返回的模型名。
+  const responseModelNameFields = (
     <FormField
+      control={form.control}
+      name='response_model_name'
+      render={({ field }) => (
+        <FormItem className='flex items-center justify-between gap-4 px-4 py-3'>
+          <div className='min-w-0 space-y-0.5'>
+            <FormLabel>{t('Use request model name in responses')}</FormLabel>
+            <FormDescription>
+              {t(
+                'Return the model name requested by the client in JSON and streaming responses, including Chat Completions, Messages and Responses.'
+              )}
+            </FormDescription>
+          </div>
+          <FormControl>
+            <Switch
+              className='shrink-0'
+              disabled={sensitiveLocked}
+              checked={field.value === true}
+              onCheckedChange={field.onChange}
+            />
+          </FormControl>
+        </FormItem>
+      )}
+    />
+  )
+  // ===== CUSTOM END =====
+
+  const ollamaOpenAIChatFields = currentType === CHANNEL_TYPE_OLLAMA && (    <FormField
       control={form.control}
       name='ollama_openai_chat'
       render={({ field }) => (
@@ -4742,6 +4775,9 @@ export function ChannelMutateDrawer({
                   disabled={sensitiveLocked || isSubmitting}
                 />
                 {formatFields}
+                {/* ===== CUSTOM START: response_model_name 开关 ===== */}
+                {responseModelNameFields}
+                {/* ===== CUSTOM END ===== */}
                 {ollamaOpenAIChatFields}
                 {thinkingFields}
                 {currentType !== CHANNEL_TYPE_ADVANCED_CUSTOM &&

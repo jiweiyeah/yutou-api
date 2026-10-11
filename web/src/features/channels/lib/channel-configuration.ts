@@ -64,6 +64,9 @@ const CONFIGURATION_BLOCKS = {
       'ollama_openai_chat',
       'system_prompt',
       'system_prompt_override',
+      // ===== CUSTOM START: response_model_name 开关 =====
+      'response_model_name',
+      // ===== CUSTOM END =====
     ],
   },
   fieldPassthrough: {
@@ -165,7 +168,10 @@ export function getChannelConfigurationState(
         values.responses_websocket_enabled) ||
       (values.type === CHANNEL_TYPE_OLLAMA && values.ollama_openai_chat) ||
       values.system_prompt?.trim() ||
-      values.system_prompt_override
+      values.system_prompt_override ||
+      // ===== CUSTOM START: response_model_name 开关 =====
+      values.response_model_name
+      // ===== CUSTOM END =====
     ),
     fieldPassthrough: Boolean(
       ((openaiPassthrough || claudePassthrough) &&
