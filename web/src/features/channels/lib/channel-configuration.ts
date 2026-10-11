@@ -78,6 +78,12 @@ const CONFIGURATION_BLOCKS = {
       'claude_beta_query',
     ],
   },
+  // ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
+  errorRewrite: {
+    section: 'request',
+    fields: ['error_rewrite'],
+  },
+  // ===== CUSTOM END =====
   extraSettings: {
     section: 'other',
     fields: [
@@ -172,6 +178,9 @@ export function getChannelConfigurationState(
         (values.allow_speed ||
           (values.type === 14 && values.claude_beta_query)))
     ),
+    // ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
+    errorRewrite: (values.error_rewrite?.length ?? 0) > 0,
+    // ===== CUSTOM END =====
     extraSettings: Boolean(
       values.proxy?.trim() ||
       (values.http_protocol && values.http_protocol !== 'auto') ||

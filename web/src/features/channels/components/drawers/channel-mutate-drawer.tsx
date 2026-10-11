@@ -38,6 +38,7 @@ import {
   Code,
   Route,
   Settings,
+  ShieldAlert,
   SlidersHorizontal,
   Wand2,
 } from 'lucide-react'
@@ -212,6 +213,9 @@ import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
 import { ConfigureModelsDialog } from '../dialogs/configure-models-dialog'
+// ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
+import { ErrorRewriteEditor } from '../error-rewrite-editor'
+// ===== CUSTOM END =====
 import {
   MissingModelsConfirmationDialog,
   type MissingModelsAction,
@@ -316,6 +320,9 @@ const SENSITIVE_FORM_FIELDS = [
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
   'upstream_model_update_ignored_models',
+  // ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
+  'error_rewrite',
+  // ===== CUSTOM END =====
 ] satisfies (keyof ChannelFormValues)[]
 
 function parseSettingsRecord(
@@ -3113,6 +3120,58 @@ export function ChannelMutateDrawer({
     </div>
   )
 
+  // ===== CUSTOM START: 上游错误改写规则（error_rewrite） =====
+  // 上游把某个已知条件报成误导性的状态码与文案时，用这里的规则把它改写成
+  // 客户端能正确处理的错误。规则按顺序匹配，第一条命中即生效。
+  const errorRewriteFields = (
+    <div
+      role='group'
+      aria-label={t('Upstream Error Rewrite')}
+      className={channelConfigurationBlockClassName(
+        configuration.blocks.errorRewrite,
+        'flex flex-col gap-4'
+      )}
+    >
+      <CardHeading
+        title={t('Upstream Error Rewrite')}
+        status={configuration.blocks.errorRewrite}
+        icon={<ShieldAlert className='h-4 w-4' />}
+        iconTone='warning'
+      />
+      <fieldset
+        disabled={sensitiveLocked}
+        className='space-y-4 disabled:opacity-60'
+      >
+        <FormField
+          control={form.control}
+          name='error_rewrite'
+          render={({ field }) => (
+            <FormItem className='space-y-3'>
+              <FormDescription>
+                {t(
+                  'Some upstreams report a known condition with a misleading status code and message'
+                )}
+              </FormDescription>
+              <FormControl>
+                <ErrorRewriteEditor
+                  value={field.value ?? []}
+                  onChange={field.onChange}
+                />
+              </FormControl>
+              <FormDescription>
+                {t(
+                  'Rules are matched in order against the upstream error message; the first match wins'
+                )}
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      </fieldset>
+    </div>
+  )
+  // ===== CUSTOM END =====
+
   const modelsSection = (
     <div className='scroll-mt-4'>
       <ChannelModelsSection>
@@ -4692,6 +4751,9 @@ export function ChannelMutateDrawer({
               </fieldset>
             </div>
             {fieldPassthroughFields}
+            {/* ===== CUSTOM START: 上游错误改写规则（error_rewrite） ===== */}
+            {errorRewriteFields}
+            {/* ===== CUSTOM END ===== */}
           </>
         }
         other={
