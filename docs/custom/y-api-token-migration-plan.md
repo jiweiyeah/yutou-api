@@ -199,8 +199,12 @@ session-only 是**刻意的安全设计**（"只有用户自己能给自己生�
 
 ### Phase 4 — admin 令牌替换（人工，约 10 分钟）
 
-- [ ] 247（2FA 用户）浏览器登录 `yutou.bestvirtualgoods.com` →
-      安全与访问 → 创建访问令牌：name=`Y-API Worker`，
+**无法自动化（2026-10-13 核实）**：247 有 2FA 且无 OAuth 绑定；创建 PAT 的
+`POST /api/user/access_tokens` 要求 `RequireSecurityProof`，对 2FA 用户唯一
+可用方法是 2FA 码（在本人手机上）。登录方式 = **LinuxDO**（`linux_do_id=68845`）。
+
+- [ ] 247 浏览器登录 `yutou.bestvirtualgoods.com`（LinuxDO 登录 + 2FA）→
+      `/security`（安全与访问）→ 创建访问令牌：name=`Y-API Worker`，
       scopes=`user:read`+`user:write`+`log:read`，有效期=永不过期
 - [ ] `npx wrangler secret put B_ADMIN_ACCESS_TOKEN`（Y-API 项目，粘贴 nap_ 明文）
 - [ ] 本地 `Y-API/.dev.vars` 同步更新（4 个运维脚本随之生效）
@@ -209,8 +213,15 @@ session-only 是**刻意的安全设计**（"只有用户自己能给自己生�
 
 ### Phase 5 — kite502-watch（独立于 Y-API，同样在 30 天内）
 
-- [ ] 为 yeheboo(id=1) 创建 `nap_` PAT，scope=`channel:operate`
-- [ ] 更新 `/root/kite502-watch/config.env` 的 `ADMIN_TOKEN`
+**同样无法自动化**：yeheboo(1) 有 2FA（`github_id=156828820` 登录）。
+`/api/channel/status/batch` 走 `authz.ChannelOperate` → scope `channel:operate`
+（`router/channel-router.go:71`；PAT 桥接 `middleware/auth.go:291` 按
+`METHOD /full/path` 查声明规则）。该路由**不需要** security proof
+（`SecureVerificationRequired` 只挂在 `/:id/key`）。
+
+- [ ] yeheboo(1) 浏览器登录 → `/security` 创建 `nap_` PAT，
+      scope 勾选 `channel:operate`（系统组 → 渠道 → 操作），有效期=永不过期
+- [ ] 更新 `/root/kite502-watch/config.env` 的 `ADMIN_TOKEN`（`chmod 600`）
 - [ ] 观察一个 cron 周期（10 分钟）确认启用动作成功
 
 ## 4. 回退预案
