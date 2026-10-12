@@ -197,32 +197,34 @@ session-only 是**刻意的安全设计**（"只有用户自己能给自己生�
 > 执行通道：会话 cookie 是 httpOnly（浏览器 JS 读不到明文），但可从 DevTools
 > 网络面板取出 `ya_session` 值，用 `fetch` 脚本直调迁移路由——比逐批手点快得多。
 
-### Phase 4 — admin 令牌替换（人工，约 10 分钟）
+### Phase 4 — admin 令牌替换（✅ 2026-10-13 完成）
 
-**无法自动化（2026-10-13 核实）**：247 有 2FA 且无 OAuth 绑定；创建 PAT 的
-`POST /api/user/access_tokens` 要求 `RequireSecurityProof`，对 2FA 用户唯一
-可用方法是 2FA 码（在本人手机上）。登录方式 = **LinuxDO**（`linux_do_id=68845`）。
+**实际做法**：yeheboo(1) 手工在 `/security` 创建了一把 `Y-API Worker` PAT
+（id 2159，scopes 含 `user:read`+`user:write`+`log:read`+`channel:operate` 等 20 项，
+永不过期），**Phase 4 与 Phase 5 共用这一把**——PAT 身份从 token 推导，
+与 Y-API 配置的 `B_ADMIN_USER_ID=247` 无关（新代码不读 `New-Api-User` 头；
+Y-API 的 `http.ts` 守卫只校验 `userId > 0`，不比对属主）。
 
-- [ ] 247 浏览器登录 `yutou.bestvirtualgoods.com`（LinuxDO 登录 + 2FA）→
-      `/security`（安全与访问）→ 创建访问令牌：name=`Y-API Worker`，
-      scopes=`user:read`+`user:write`+`log:read`，有效期=永不过期
-- [ ] `npx wrangler secret put B_ADMIN_ACCESS_TOKEN`（Y-API 项目，粘贴 nap_ 明文）
-- [ ] 本地 `Y-API/.dev.vars` 同步更新（4 个运维脚本随之生效）
-- [ ] 验证：`scripts/cohort-report.mjs` 可正常拉数；Y-API 生产管理页功能正常
-- [ ] suspend/delete 半自动链路联调（若拍板此方案）
+- [x] `npx wrangler secret put B_ADMIN_ACCESS_TOKEN`（Y-API 生产，已生效）
+- [x] 本地 `Y-API/.dev.vars` 同步更新（4 个运维脚本随之生效）
+- [x] 验证：7 个读端点全 200；写端点到达业务校验层（`/api/user/manage`
+      返回 quota 校验错、`/api/channel/status/batch` 返回 `success:true`）；
+      Y-API 生产 `/api/admin/users`、`/api/admin/usage` 200
+- [x] **端到端铁证**：audit_logs 里 `token_ref`（10-13 00:45 起 15+ 条
+      `/api/user/:id`、`/api/data/`）== 本地 SHA-256(新 PAT) == DB
+      `user_access_tokens.id=2159.token_hash`，三处一致
 
-### Phase 5 — kite502-watch（独立于 Y-API，同样在 30 天内）
+### Phase 5 — kite502-watch（✅ 2026-10-13 完成）
 
-**同样无法自动化**：yeheboo(1) 有 2FA（`github_id=156828820` 登录）。
-`/api/channel/status/batch` 走 `authz.ChannelOperate` → scope `channel:operate`
-（`router/channel-router.go:71`；PAT 桥接 `middleware/auth.go:291` 按
-`METHOD /full/path` 查声明规则）。该路由**不需要** security proof
-（`SecureVerificationRequired` 只挂在 `/:id/key`）。
-
-- [ ] yeheboo(1) 浏览器登录 → `/security` 创建 `nap_` PAT，
-      scope 勾选 `channel:operate`（系统组 → 渠道 → 操作），有效期=永不过期
-- [ ] 更新 `/root/kite502-watch/config.env` 的 `ADMIN_TOKEN`（`chmod 600`）
-- [ ] 观察一个 cron 周期（10 分钟）确认启用动作成功
+- [x] 复用 Phase 4 的同一把 PAT（scope 含 `channel:operate`；
+      `/api/channel/status/batch` 走 `authz.ChannelOperate`，
+      `router/channel-router.go:71`，不需要 security proof）
+- [x] 更新 `/root/kite502-watch/config.env` 的 `ADMIN_TOKEN`（备份
+      `config.env.bak-20261013`，`chmod 600`）
+- [x] 令牌鉴权实测：`{"ids":[999999],"status":1}` → `success:true, data:0`
+      （无副作用，999999 不存在；10821/10867 状态未被改动）
+- [ ] 待上游恢复后观察一个 cron 周期确认启用动作成功（当前上游仍 DOWN，
+      armed 状态保持，脚本只记录不动作）
 
 ## 4. 回退预案
 
