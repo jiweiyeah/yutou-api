@@ -150,12 +150,27 @@ session-only 是**刻意的安全设计**（"只有用户自己能给自己生�
 
 ### Phase 2 — B 站部署（沿用既有流程）
 
-- [ ] `git push origin custom` + 触发 GitHub Actions「Custom — Build & deploy to server」
-      （ref=custom, tag=latest, platforms=linux/amd64, deploy=true）
-- [ ] 部署后核对：容器 healthy、10856/10872/10879 responses 测试、
-      `options.LegacyAccessTokenRetireAt` 已写入（= 过渡期起点，+30 天）
-- [ ] 立即验证 Y-API：新开户全流程（OAuth login → 建默认密钥 → 发新人额度）
-      + 一个存量用户 dashboard（余额/密钥/日志）
+**✅ 2026-10-12 20:22 完成**（run `38247537301`，build 8m58s + deploy 1m40s）。
+
+- [x] `git push origin custom`（`da43dea92..26218b82c`，379 提交）+ 触发 GitHub
+      Actions「Custom — Build & deploy to server」（ref=custom, tag=latest,
+      platforms=linux/amd64, deploy=true）
+- [x] 部署后核对：
+      - 容器 healthy（新镜像已上线）
+      - `options.LegacyAccessTokenRetireAt` = **2026-11-11 20:22**（+30 天窗口起点）
+      - `POST /api/oauth/state` 返回 `data.flow_token`（新契约生效）
+      - 网关冒烟：`/v1/chat/completions`、`/v1/messages`、`/v1/responses` 全 200；
+        计费日志正常写入
+      - 旧 32 位令牌过渡期仍有效（247 旧令牌调 `/api/user/self` → 200）
+      - 限流绕过端到端 5/5 通过（`X-RateLimit-Bypass-Token` 生效）
+      - kitedelayed / 动态代理等自定义 env 全部存活
+      - 10879 的 responses 测试**未做**——该渠道当天 15:18 被手动禁用，
+        按纪律不启用已禁用渠道做实测
+- [x] Y-API 侧验证：`detectOAuthContract` 判定 `new`、`requestFlowState`
+      拿到 flow_token（真实 B 站，一次性冒烟测试）；Y-API 站点 200。
+      **真实新开户未发生**（部署后暂无新注册用户，不可强造）——首个真实
+      开户/明晨 daily-key 轮换（08:05，届时走 `repairLegacyToken` 三步舞
+      换 `nap_` PAT）是后续观察点。
 
 ### Phase 3 — 存量令牌迁移（部署后 30 天窗口内）
 
