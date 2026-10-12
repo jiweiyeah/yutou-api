@@ -190,9 +190,10 @@ session-only 是**刻意的安全设计**（"只有用户自己能给自己生�
   - **游标越过失败项**：失败用户不回头，续跑不会重试它们；最终验收须**从头
     重扫一遍**（幂等，已迁移显示 `alreadyPat`），而不是只看主跑计数。
 - [x] daily-key 账号已迁移（`dailyKey: "already-pat"`）
-- [ ] 全量：~2104 用户（2026-10-12 21:48 起后台跑，约 0.5 人/秒）
-- [ ] 2FA 用户（247 及任何新增）单独人工处理或走 Phase 4 的浏览器路径
-- [ ] 迁移完成核对：从头重扫一遍（全量 `alreadyPat` = 完成），失败清单人工清零
+- [x] 全量：2156 用户迁移完毕（100% 覆盖，最终重扫 2149 alreadyPat + 7 补迁 + 0 失败）
+- [x] 2FA 用户（247）按计划走 Phase 4 的人工路径（admin PAT 共用）
+- [x] 迁移完成核对：从头重扫一遍确认（全量 `alreadyPat` = 完成）
+- [x] **孤儿用户 2168 修复（2026-10-13）** —— 见 §7
 
 > 执行通道：会话 cookie 是 httpOnly（浏览器 JS 读不到明文），但可从 DevTools
 > 网络面板取出 `ya_session` 值，用 `fetch` 脚本直调迁移路由——比逐批手点快得多。
@@ -253,3 +254,60 @@ Y-API 的 `http.ts` 守卫只校验 `userId > 0`，不比对属主）。
   若未来要全自动需重新评估 passkey（WebAuthn ceremony 同样需人）。
 - daily-key 账号（ya-daily）若在 D1 坐标丢失时需重新自举——自举走新契约，
   已在 Phase 1 覆盖。
+
+## 7. 孤儿用户 2168 修复记录（2026-10-13）
+
+### 7.1 根因
+
+用户 2168（`shuang huang`，B 站 `ya-bn94xt57rxdu34ym`）**注册于
+2026-09-28 15:53:15 UTC，正落在账号 C 接管窗口（15:45–15:54 UTC，
+`DR_MODE=on`）内**——他的 D1 `users` 行与 `oauth_accounts` 行写进了 C 库；
+16:0x C 被 Cloudflare 停用（§10.28），这两行数据**永久不可读**。
+
+取证链：
+- A 主库（09-28 冻结快照）`users` 最大 `created_at` = 15:30:24 UTC，**无 2168**；
+- D 备库（从 A 导出）同样无 2168；`oauth_accounts` 孤儿行数 = 0（指向已删用户的行不存在）；
+- B 站侧 2168 完好：2 个密钥（`default` 3521 + `kiy` 3522）、quota 9834（已用 490166）、
+  OAuth 绑定（provider 2 ↔ `bn94xt57rxdu34ym`）、69 次调用（截至 10-04）；
+- 全量 diff（B 站 `ya-*` 活跃账号 vs D1 `b_username`）确认 **2168 是唯一受影响的活跃用户**
+  （另一个差集 `ya-daily` 是日常账号，预期内）。
+
+### 7.2 邮箱恢复（关键一步）
+
+重建 D1 行只需要 email（登录时 `account.ts:55` 按 email 命中已有用户会自动补挂
+GitHub 绑定，不需要预知 GitHub id）。邮箱随 C 库丢失，但在**邮件服务商历史里找回**：
+
+- Resend 的 `GET /emails` 列表 API（游标分页 `after=<id>`）可回溯到 09-28；
+- 09-28 15:53:16 UTC 有一封 `Your Y-API key is ready` 发往 `huan***@gmail.com`，
+  与注册时刻（15:53:15 UTC）**精确到秒吻合**、姓氏与 `shuang huang` 相符、
+  `last_event: delivered` ⇒ 即 2168 的收件地址。
+- 该地址在 D1 中无占用（`findByEmail` 唯一性检查通过）。
+
+### 7.3 修复动作
+
+1. 向 DR 生产库插入 `users` 行：`id=bn94xt57rxdu34ym`、
+   `email=huangshuang319@gmail.com`、`b_user_id=2168`、`b_username=ya-bn94xt57rxdu34ym`、
+   `provision_state='pending'`、`created_at=1790610795`（原注册时刻）、新 `aff_code`。
+2. 3 分钟一轮的开户补偿 Cron 自动跑完：`ensureIdentity`（OAuth 登录命中 B 站
+   2168 绑定 → 三步舞签发 `nap_` PAT `id=2160`，scopes
+   `api_key:read/reveal/write`，永不过期）→ `ensureGroup`（已是 y-api，跳过）→
+   `ensureDefaultToken`（`default` 密钥已存在，跳过）→ `ensureSignupBonus`。
+3. **副作用与修正**：`ensureSignupBonus` 用 override 把余额从 9834 覆盖成
+   500000（新人额度）——这是该步骤的已知行为，防它的 `hasQuotaHistory` 判据
+   要求 transactions 里先有非零行，而 Cron 在插入后 3 分钟内就跑完了。
+   已用 admin API `mode=override` 恢复余额到 **9834**（B 站 `logs` 留下两条
+   `Overrode user quota` 记录为权威审计）。
+4. 字段对齐：`marketing_email_opt_in=1`（注册默认值）、
+   `api_called_at=1790611092`（B 站日志可证实的真实首次调用时刻）、
+   `first_call_at=1790607600`（该时刻的整点桶起点，与 `first-call.ts` 约定一致）。
+
+### 7.4 验收
+
+- D1：`provision_state=completed`、`provision_error=null`、`b_access_token_enc` 已写
+  （`v1.` 前缀）；全库无重复 `b_user_id` / `email`；未开户数回到 0。
+- B 站：`user_access_tokens` 新增 PAT（`access_token.generate` 审计事件在案）、
+  分组仍 `y-api`、余额 9834、两个 sk- 密钥未受影响。
+- 用户下次 GitHub 登录：`findByEmail('huangshuang319@gmail.com')` 命中 → 自动补挂
+  `oauth_accounts` 绑定 → 登录成功，dashboard 与密钥操作全部可用。
+- 遗留：`oauth_accounts` 行会在用户下次登录时自动补上（届时 GitHub id 才可知）；
+  在此之前他的登录**依赖邮箱匹配**——该邮箱来自 Resend 收件记录，可信。
