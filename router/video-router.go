@@ -16,6 +16,9 @@ func SetVideoRouter(router *gin.Engine) {
 		"/video/generations",
 		middleware.PinTaskPluginEndpoint(),
 		middleware.TaskPluginEndpointOnly(middleware.ModelRequestRateLimit()),
+		// ===== CUSTOM START: free-model per-group rate limit =====
+		middleware.TaskPluginEndpointOnly(middleware.FreeModelRateLimit()),
+		// ===== CUSTOM END =====
 		middleware.PrepareTaskPluginEndpoint(),
 		middleware.Distribute(),
 		func(c *gin.Context) {

@@ -119,6 +119,9 @@ func productionPluginRouteHandlers(generation *jsplugin.RoutingGeneration, bindi
 		middleware.TokenAuth(),
 		middleware.SystemPerformanceCheck(),
 		middleware.ModelRequestRateLimit(),
+		// ===== CUSTOM START: free-model per-group rate limit =====
+		middleware.FreeModelRateLimit(),
+		// ===== CUSTOM END =====
 		middleware.PrepareTaskPluginRoute(),
 		middleware.Distribute(),
 		controller.RelayTask,

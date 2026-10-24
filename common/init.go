@@ -141,6 +141,14 @@ func InitEnv() {
 	RateLimitBypassToken = GetEnvOrDefaultString("RATE_LIMIT_BYPASS_TOKEN", "")
 	// ===== CUSTOM END =====
 
+	// ===== CUSTOM START: free-model per-group rate limit =====
+	FreeModelRateLimitEnabled = GetEnvOrDefaultBool("FREE_MODEL_RATE_LIMIT_ENABLED", false)
+	FreeModelRateLimitGroups = GetEnvOrDefaultString("FREE_MODEL_RATE_LIMIT_GROUPS", "")
+	FreeModelRateLimitCount = GetEnvOrDefault("FREE_MODEL_RATE_LIMIT_COUNT", 0)
+	FreeModelRateLimitWindowMin = GetEnvOrDefault("FREE_MODEL_RATE_LIMIT_WINDOW_MIN", 1440)
+	FreeModelRateLimitConcurrency = GetEnvOrDefault("FREE_MODEL_RATE_LIMIT_CONCURRENCY", 0)
+	// ===== CUSTOM END =====
+
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
 	SearchRateLimitDuration = int64(GetEnvOrDefault("SEARCH_RATE_LIMIT_DURATION", 60))

@@ -22,6 +22,11 @@ const (
 	MsgRateLimitReached      = "rate_limit.reached"
 	MsgRateLimitTotalReached = "rate_limit.total_reached"
 
+	// ===== CUSTOM START: free-model per-group rate limit =====
+	MsgFreeModelRateLimitReached   = "rate_limit.free_model_reached"
+	MsgFreeModelConcurrencyReached = "rate_limit.free_model_concurrency_reached"
+	// ===== CUSTOM END =====
+
 	MsgDistributorInvalidRequest               = "distributor.invalid_request"
 	MsgDistributorInvalidChannelId             = "distributor.invalid_channel_id"
 	MsgDistributorChannelDisabled              = "distributor.channel_disabled"
