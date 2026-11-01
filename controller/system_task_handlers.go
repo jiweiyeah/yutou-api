@@ -33,12 +33,17 @@ func RegisterScheduledSystemTasks() {
 // again but that are still sitting in the auto-disabled state. Only status=3
 // keys are probed and only a 2xx probe re-enables one, so the job can never
 // disable a key and never overrules a manual (status=2) disable.
+//
+// Disabled by default: the upstream pool (channel 10864) was fully drained on
+// 2026-10-14 — every key auto-disabled by permanent 429 quota exhaustion, so
+// recovery probes have had nothing to enable since. Set
+// ATRIA_KEY_RECOVERY_TASK_ENABLED=true if the keys are refilled.
 type atriaKeyRecoveryHandler struct{}
 
 func (atriaKeyRecoveryHandler) Type() string { return model.SystemTaskTypeAtriaKeyRecovery }
 
 func (atriaKeyRecoveryHandler) Enabled() bool {
-	return common.GetEnvOrDefaultBool("ATRIA_KEY_RECOVERY_TASK_ENABLED", true)
+	return common.GetEnvOrDefaultBool("ATRIA_KEY_RECOVERY_TASK_ENABLED", false)
 }
 
 func (atriaKeyRecoveryHandler) Interval() time.Duration {
