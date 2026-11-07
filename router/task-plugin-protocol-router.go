@@ -33,7 +33,7 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 			// ===== CUSTOM START: free-model per-group rate limit =====
 			middleware.FreeModelRateLimit(),
 			// ===== CUSTOM END =====
-			middleware.PinTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
+			middleware.RouteTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
 			func(c *gin.Context) {
 				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIResponses) })
 			},
@@ -45,7 +45,7 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 			// ===== CUSTOM START: free-model per-group rate limit =====
 			middleware.FreeModelRateLimit(),
 			// ===== CUSTOM END =====
-			middleware.PinTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
+			middleware.RouteTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
 			func(c *gin.Context) {
 				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIImage) })
 			},
@@ -53,7 +53,7 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 	case "openai_video.create":
 		return []gin.HandlerFunc{
 			middleware.RouteTag("relay"), middleware.TokenAuth(), middleware.SystemPerformanceCheck(),
-			middleware.PinTaskPluginEndpoint(), middleware.TaskPluginEndpointOnly(middleware.ModelRequestRateLimit()),
+			middleware.RouteTaskPluginEndpoint(), middleware.TaskPluginEndpointOnly(middleware.ModelRequestRateLimit()),
 			// ===== CUSTOM START: free-model per-group rate limit =====
 			middleware.TaskPluginEndpointOnly(middleware.FreeModelRateLimit()),
 			// ===== CUSTOM END =====
@@ -63,7 +63,7 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 	case "openai_responses.retrieve":
 		return []gin.HandlerFunc{middleware.RouteTag("relay"), middleware.TokenAuth(), controller.RetrieveTaskPluginResponse}, nil
 	case "openai_video.retrieve":
-		return []gin.HandlerFunc{middleware.RouteTag("relay"), middleware.TokenAuth(), middleware.Distribute(), controller.RelayTaskFetch}, nil
+		return []gin.HandlerFunc{middleware.RouteTag("relay"), middleware.TokenAuth(), defaultPluginDispatcher.handOffNativeTaskQuery, middleware.Distribute(), controller.RelayTaskFetch}, nil
 	case "openai_video.content":
 		return []gin.HandlerFunc{middleware.RouteTag("relay"), middleware.TokenAuth(), controller.VideoProxy}, nil
 	default:

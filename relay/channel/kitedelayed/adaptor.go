@@ -319,7 +319,6 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 				select {
 				case <-ticker.C:
 					helper.SetEventStreamHeaders(c)
-					helper.ExtendWriteDeadline(c)
 					if err := helper.PingData(c); err != nil {
 						cancel()
 						return
@@ -456,7 +455,6 @@ func (a *Adaptor) doKiteRouterRequest(c *gin.Context, info *relaycommon.RelayInf
 				select {
 				case <-ticker.C:
 					helper.SetEventStreamHeaders(c)
-					helper.ExtendWriteDeadline(c)
 					if err := helper.PingData(c); err != nil {
 						// 客户端已断开，连带中止上游请求
 						cancel()
