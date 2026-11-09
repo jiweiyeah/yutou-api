@@ -71,6 +71,12 @@ func clearChannelInfo(channel *model.Channel) {
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
+		// ===== CUSTOM START: 隐藏 Dahl key 维护快照 =====
+		// Maintenance snapshots are an internal scheduler input. Exposing one
+		// entry per enabled key would add tens to hundreds of kilobytes to
+		// every channel list/detail response.
+		channel.ChannelInfo.MultiKeyHealth = nil
+		// ===== CUSTOM END =====
 	}
 }
 

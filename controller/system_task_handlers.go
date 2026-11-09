@@ -22,6 +22,9 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(kiteCreditsHandler{})
+	// ===== CUSTOM START: Dahl key 维护任务 =====
+	service.RegisterSystemTaskHandler(dahlKeyMaintenanceHandler{})
+	// ===== CUSTOM END =====
 	// ===== CUSTOM START: atria key 池回收 =====
 	service.RegisterSystemTaskHandler(atriaKeyRecoveryHandler{})
 	// ===== CUSTOM END =====
@@ -95,6 +98,39 @@ func (kiteCreditsHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
+
+// ===== CUSTOM START: Dahl key 维护任务 =====
+// dahlKeyMaintenanceHandler periodically checks dahl key balances, disables
+// keys below the safety threshold, and sends one tiny completion to keys that
+// have been idle long enough to risk dahl's 7-day inactivity burn.
+type dahlKeyMaintenanceHandler struct{}
+
+func (dahlKeyMaintenanceHandler) Type() string { return model.SystemTaskTypeDahlKeyMaintenance }
+
+func (dahlKeyMaintenanceHandler) Enabled() bool {
+	return common.GetEnvOrDefaultBool("DAHL_KEY_MAINTENANCE_TASK_ENABLED", true)
+}
+
+func (dahlKeyMaintenanceHandler) Interval() time.Duration {
+	minutes := common.GetEnvOrDefault("DAHL_KEY_MAINTENANCE_INTERVAL_MINUTES", 60)
+	if minutes < 1 {
+		minutes = 60
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (dahlKeyMaintenanceHandler) NewPayload() any { return nil }
+
+func (dahlKeyMaintenanceHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := service.RunDahlKeyMaintenance(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// ===== CUSTOM END =====
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
 // cadence still come from the monitor settings; only the execution path moved

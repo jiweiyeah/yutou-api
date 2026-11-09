@@ -152,3 +152,32 @@ func TestTemporaryDisableAndRecoverSingleKeyChannel(t *testing.T) {
 	assert.Equal(t, common.ChannelStatusEnabled, reloaded.Status)
 	assert.Zero(t, reloaded.ChannelInfo.AutoDisabledUntil)
 }
+
+func TestUpdateChannelKeyHealthPreservesStatusList(t *testing.T) {
+	db := setupTemporaryDisableTestDB(t)
+	autoBan := 1
+	channel := &Channel{
+		Type:    constant.ChannelTypeAdvancedCustom,
+		Name:    "dahl",
+		Key:     "key-a\nkey-b",
+		Status:  common.ChannelStatusEnabled,
+		AutoBan: &autoBan,
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:         true,
+			MultiKeySize:       2,
+			MultiKeyStatusList: map[int]int{1: common.ChannelStatusAutoDisabled},
+		},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	health := map[string]ChannelKeyHealth{
+		"abc123": {Balance: 987654, CheckedAt: 100, LastUsed: 90, LastProbe: 80},
+	}
+	require.NoError(t, UpdateChannelKeyHealth(channel.Id, health))
+
+	reloaded, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, health, reloaded.ChannelInfo.MultiKeyHealth)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, reloaded.ChannelInfo.MultiKeyStatusList[1])
+	assert.Equal(t, []string{"key-a", "key-b"}, reloaded.GetKeys())
+}

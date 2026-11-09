@@ -63,16 +63,33 @@ type Channel struct {
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
 
 type ChannelInfo struct {
-	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
-	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
-	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
-	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
-	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
-	MultiKeyDisabledUntil  map[int]int64         `json:"multi_key_disabled_until,omitempty"`  // 临时自动禁用截止时间，key index -> time
-	AutoDisabledUntil      int64                 `json:"auto_disabled_until,omitempty"`       // 单Key临时自动禁用截止时间
-	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
-	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	IsMultiKey             bool           `json:"is_multi_key"`                        // 是否多Key模式
+	MultiKeySize           int            `json:"multi_key_size"`                      // 多Key模式下的Key数量
+	MultiKeyStatusList     map[int]int    `json:"multi_key_status_list"`               // key状态列表，key index -> status
+	MultiKeyDisabledReason map[int]string `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
+	MultiKeyDisabledTime   map[int]int64  `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+	MultiKeyDisabledUntil  map[int]int64  `json:"multi_key_disabled_until,omitempty"`  // 临时自动禁用截止时间，key index -> time
+	// ===== CUSTOM START: Dahl key 维护快照 =====
+	MultiKeyHealth map[string]ChannelKeyHealth `json:"multi_key_health,omitempty"` // key健康快照，key hash -> health
+	// ===== CUSTOM END =====
+	AutoDisabledUntil    int64                 `json:"auto_disabled_until,omitempty"` // 单Key临时自动禁用截止时间
+	MultiKeyPollingIndex int                   `json:"multi_key_polling_index"`       // 多Key模式下轮询的key索引
+	MultiKeyMode         constant.MultiKeyMode `json:"multi_key_mode"`
 }
+
+// ===== CUSTOM START: Dahl key 维护快照 =====
+// ChannelKeyHealth is the persisted per-key maintenance snapshot. It is keyed
+// by a short hash of the upstream key instead of its index so editing,
+// deleting, or reordering the key list cannot attach stale health data to a
+// different key.
+type ChannelKeyHealth struct {
+	Balance   int64 `json:"balance,omitempty"`
+	CheckedAt int64 `json:"checked_at,omitempty"`
+	LastUsed  int64 `json:"last_used,omitempty"`
+	LastProbe int64 `json:"last_probe,omitempty"`
+}
+
+// ===== CUSTOM END =====
 
 type ChannelSortOptions struct {
 	SortBy    string
@@ -1288,6 +1305,40 @@ func enableChannelKeys(channelId int, keysToEnable []string, autoDisabledOnly bo
 	CacheUpdateChannel(&channel)
 	return enabledCount, nil
 }
+
+// ===== CUSTOM START: Dahl key 维护快照 =====
+// UpdateChannelKeyHealth persists the maintenance snapshot for a multi-key
+// channel. It reads the row again under the channel locks so a concurrent
+// status change is never overwritten by a stale in-memory Channel value, and
+// writes only channel_info instead of rewriting the (potentially very large)
+// key column.
+func UpdateChannelKeyHealth(channelId int, health map[string]ChannelKeyHealth) error {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	var channel Channel
+	if len(health) == 0 {
+		health = nil
+	}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, "id = ?", channelId).Error; err != nil {
+			return err
+		}
+		channel.ChannelInfo.MultiKeyHealth = health
+		return tx.Model(&channel).Select("channel_info").Updates(channel).Error
+	})
+	if err != nil {
+		return err
+	}
+	channel.Keys = channel.GetKeys()
+	CacheUpdateChannel(&channel)
+	return nil
+}
+
+// ===== CUSTOM END =====
 
 func EnableChannelByTag(tag string) error {
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error

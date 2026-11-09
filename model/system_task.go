@@ -24,6 +24,9 @@ const (
 	// ===== CUSTOM START: Kite Delayed 密钥余额扫描 =====
 	SystemTaskTypeKiteCredits = "kite_credits"
 	// ===== CUSTOM END =====
+	// ===== CUSTOM START: Dahl 密钥余额/保活维护 =====
+	SystemTaskTypeDahlKeyMaintenance = "dahl_key_maintenance"
+	// ===== CUSTOM END =====
 	// ===== CUSTOM START: atria key 池回收 =====
 	SystemTaskTypeAtriaKeyRecovery = "atria_key_recovery"
 	// ===== CUSTOM END =====
