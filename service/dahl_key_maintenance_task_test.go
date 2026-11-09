@@ -86,6 +86,18 @@ func TestParseDahlAvailableTokens(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDahlPacerInterval(t *testing.T) {
+	assert.Equal(t, 500*time.Millisecond, newDahlPacer(120).interval)
+	assert.Equal(t, 3*time.Second, newDahlPacer(20).interval)
+	assert.Equal(t, time.Minute, newDahlPacer(0).interval)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pacer := newDahlPacer(1)
+	require.True(t, pacer.wait(context.Background()))
+	assert.False(t, pacer.wait(ctx))
+}
+
 func TestCheckDahlKeyBalance(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, dahlBalancePath, r.URL.Path)
@@ -115,6 +127,16 @@ func TestCheckDahlKeyBalance(t *testing.T) {
 	result = checkDahlKeyBalance(context.Background(), exhausted.Client(), exhausted.URL, dahlKeyEntry{key: "test-key"}, 2*time.Second)
 	require.Error(t, result.err)
 	assert.True(t, errors.Is(result.err, errDahlBalanceExhausted))
+
+	var throttledCalls int
+	throttled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		throttledCalls++
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer throttled.Close()
+	result = checkDahlKeyBalance(context.Background(), throttled.Client(), throttled.URL, dahlKeyEntry{key: "test-key"}, 2*time.Second)
+	require.Error(t, result.err)
+	assert.Equal(t, 1, throttledCalls)
 }
 
 func TestProbeDahlKey(t *testing.T) {

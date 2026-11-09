@@ -25,16 +25,18 @@ const (
 	dahlChatPath              = "/v1/chat/completions"
 	dahlDefaultProbeModelHint = "minimax-m2.7"
 
-	dahlDefaultDisableThreshold      int64 = 500_000
-	dahlDefaultIdleDays                    = 5
-	dahlDefaultBalanceCheckMinutes         = 240
-	dahlDefaultProbeRetryMinutes           = 180
-	dahlDefaultMaxProbesPerRun             = 0
-	dahlDefaultScanConcurrency             = 4
-	dahlDefaultProbeConcurrency            = 2
-	dahlDefaultProbeMaxTokens              = 16
-	dahlDefaultRequestTimeoutSeconds       = 20
-	dahlDefaultProbeTimeoutSeconds         = 60
+	dahlDefaultDisableThreshold       int64 = 500_000
+	dahlDefaultIdleDays                     = 5
+	dahlDefaultBalanceCheckMinutes          = 240
+	dahlDefaultProbeRetryMinutes            = 180
+	dahlDefaultMaxProbesPerRun              = 0
+	dahlDefaultScanConcurrency              = 4
+	dahlDefaultProbeConcurrency             = 2
+	dahlDefaultScanRequestsPerMinute        = 120
+	dahlDefaultProbeRequestsPerMinute       = 20
+	dahlDefaultProbeMaxTokens               = 16
+	dahlDefaultRequestTimeoutSeconds        = 20
+	dahlDefaultProbeTimeoutSeconds          = 60
 )
 
 var errDahlBalanceExhausted = errors.New("dahl available tokens exhausted")
@@ -68,6 +70,8 @@ type dahlMaintenanceConfig struct {
 	probeEnabled      bool
 	scanConcurrency   int
 	probeConcurrency  int
+	scanRatePerMinute int
+	probeRatePerMin   int
 	probeModel        string
 	probeMaxTokens    int
 	requestTimeout    time.Duration
@@ -93,6 +97,38 @@ type dahlProbeResult struct {
 	exhausted  bool
 	authFailed bool
 	err        error
+}
+
+// dahlPacer spaces request starts evenly across workers. dahl rate-limits
+// bursts per client, so firing 300 balance checks at full concurrency made
+// roughly a third of the sweep return HTTP 429 even though the same requests
+// spaced a second apart all succeed.
+type dahlPacer struct {
+	mu       sync.Mutex
+	next     time.Time
+	interval time.Duration
+}
+
+func newDahlPacer(requestsPerMinute int) *dahlPacer {
+	if requestsPerMinute < 1 {
+		requestsPerMinute = 1
+	}
+	return &dahlPacer{interval: time.Minute / time.Duration(requestsPerMinute)}
+}
+
+func (p *dahlPacer) wait(ctx context.Context) bool {
+	p.mu.Lock()
+	now := time.Now()
+	if p.next.Before(now) {
+		p.next = now
+	}
+	delay := p.next.Sub(now)
+	p.next = p.next.Add(p.interval)
+	p.mu.Unlock()
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	return sleepWithContext(ctx, delay)
 }
 
 // RunDahlKeyMaintenance keeps dahl key pools healthy with the smallest useful
@@ -223,9 +259,7 @@ func runDahlChannelMaintenance(ctx context.Context, channel *model.Channel, cfg 
 			summary.BalanceChecked++
 			entry := result.entry
 			current := health[entry.healthID]
-			current.CheckedAt = now
 			if result.err != nil {
-				health[entry.healthID] = current
 				if result.authFailed {
 					summary.AuthFailedKeys++
 					reasonsByKey[entry.key] = fmt.Sprintf("dahl maintenance: key unauthorized: %v", result.err)
@@ -234,10 +268,14 @@ func runDahlChannelMaintenance(ctx context.Context, channel *model.Channel, cfg 
 				if errors.Is(result.err, errDahlBalanceExhausted) {
 					summary.LowBalanceKeys++
 					current.Balance = 0
+					current.CheckedAt = now
 					health[entry.healthID] = current
 					reasonsByKey[entry.key] = "dahl maintenance: available tokens exhausted"
 					continue
 				}
+				// A transient failure (429, timeout, 5xx) says nothing about the
+				// balance, so leave CheckedAt untouched: the key stays due and
+				// the next pass retries it instead of waiting a full interval.
 				summary.BalanceErrors++
 				if firstBalanceError == "" {
 					firstBalanceError = result.err.Error()
@@ -248,6 +286,7 @@ func runDahlChannelMaintenance(ctx context.Context, channel *model.Channel, cfg 
 			// A lower balance than the previous observation is the cheapest
 			// reliable "this key did real work" signal: dahl returns integer
 			// tokens and every successful inference deducts at least one.
+			current.CheckedAt = now
 			if entry.health.CheckedAt > 0 && result.balance < entry.health.Balance {
 				current.LastUsed = now
 			}
@@ -386,8 +425,8 @@ func runDahlChannelMaintenance(ctx context.Context, channel *model.Channel, cfg 
 	}
 
 	common.SysLog(fmt.Sprintf(
-		"dahl key maintenance: channel #%d enabled=%d checked=%d low=%d disabled=%d probes=%d ok=%d probe_errors=%d balance_errors=%d",
-		channel.Id, enabledCount, summary.BalanceChecked-start.BalanceChecked, summary.LowBalanceKeys-start.LowBalanceKeys,
+		"dahl key maintenance: channel #%d model=%s enabled=%d checked=%d low=%d disabled=%d probes=%d ok=%d probe_errors=%d balance_errors=%d",
+		channel.Id, probeModel, enabledCount, summary.BalanceChecked-start.BalanceChecked, summary.LowBalanceKeys-start.LowBalanceKeys,
 		summary.DisabledKeys-start.DisabledKeys, summary.IdleProbes-start.IdleProbes,
 		summary.ProbeSucceeded-start.ProbeSucceeded, summary.ProbeErrors-start.ProbeErrors,
 		summary.BalanceErrors-start.BalanceErrors,
@@ -396,6 +435,7 @@ func runDahlChannelMaintenance(ctx context.Context, channel *model.Channel, cfg 
 
 func runDahlBalanceChecks(ctx context.Context, client *http.Client, baseURL string, entries []dahlKeyEntry, cfg dahlMaintenanceConfig, progress func(processed int)) []dahlBalanceCheckResult {
 	concurrency := min(max(cfg.scanConcurrency, 1), len(entries))
+	pacer := newDahlPacer(cfg.scanRatePerMinute)
 	jobs := make(chan dahlKeyEntry)
 	results := make(chan dahlBalanceCheckResult, len(entries))
 
@@ -403,6 +443,9 @@ func runDahlBalanceChecks(ctx context.Context, client *http.Client, baseURL stri
 	for range concurrency {
 		workers.Go(func() {
 			for entry := range jobs {
+				if !pacer.wait(ctx) {
+					return
+				}
 				results <- checkDahlKeyBalance(ctx, client, baseURL, entry, cfg.requestTimeout)
 			}
 		})
@@ -434,6 +477,7 @@ func runDahlBalanceChecks(ctx context.Context, client *http.Client, baseURL stri
 
 func runDahlProbes(ctx context.Context, client *http.Client, baseURL string, probeModel string, entries []dahlKeyEntry, cfg dahlMaintenanceConfig, progress func(processed int)) []dahlProbeResult {
 	concurrency := min(max(cfg.probeConcurrency, 1), len(entries))
+	pacer := newDahlPacer(cfg.probeRatePerMin)
 	jobs := make(chan dahlKeyEntry)
 	results := make(chan dahlProbeResult, len(entries))
 
@@ -441,6 +485,9 @@ func runDahlProbes(ctx context.Context, client *http.Client, baseURL string, pro
 	for range concurrency {
 		workers.Go(func() {
 			for entry := range jobs {
+				if !pacer.wait(ctx) {
+					return
+				}
 				results <- probeDahlKey(ctx, client, baseURL, probeModel, entry, cfg.probeMaxTokens, cfg.probeTimeout)
 			}
 		})
@@ -523,7 +570,12 @@ func checkDahlKeyBalance(ctx context.Context, client *http.Client, baseURL strin
 		case resp.StatusCode == http.StatusPaymentRequired:
 			result.err = errDahlBalanceExhausted
 			return result
-		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError:
+		case resp.StatusCode == http.StatusTooManyRequests:
+			// Retrying a throttled balance check immediately only deepens the
+			// throttle; leave the key for the next pass.
+			result.err = errors.New("upstream rate limited balance check (HTTP 429)")
+			return result
+		case resp.StatusCode >= http.StatusInternalServerError:
 			lastErr = fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
 			continue
 		default:
@@ -611,7 +663,12 @@ func probeDahlKey(ctx context.Context, client *http.Client, baseURL string, prob
 			result.exhausted = true
 			result.err = errDahlBalanceExhausted
 			return result
-		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError:
+		case resp.StatusCode == http.StatusTooManyRequests:
+			// A throttled probe is retried after the probe retry interval, not
+			// immediately; hammering the same key only extends the throttle.
+			result.err = errors.New("upstream rate limited probe (HTTP 429)")
+			return result
+		case resp.StatusCode >= http.StatusInternalServerError:
 			lastErr = fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
 			continue
 		default:
@@ -747,6 +804,8 @@ func loadDahlMaintenanceConfig() dahlMaintenanceConfig {
 		probeEnabled:      common.GetEnvOrDefaultBool("DAHL_KEY_PROBE_ENABLED", true),
 		scanConcurrency:   envInt("DAHL_KEY_SCAN_CONCURRENCY", dahlDefaultScanConcurrency),
 		probeConcurrency:  envInt("DAHL_KEY_PROBE_CONCURRENCY", dahlDefaultProbeConcurrency),
+		scanRatePerMinute: envInt("DAHL_KEY_SCAN_REQUESTS_PER_MINUTE", dahlDefaultScanRequestsPerMinute),
+		probeRatePerMin:   envInt("DAHL_KEY_PROBE_REQUESTS_PER_MINUTE", dahlDefaultProbeRequestsPerMinute),
 		probeModel:        strings.TrimSpace(common.GetEnvOrDefaultString("DAHL_KEY_PROBE_MODEL", "")),
 		probeMaxTokens:    envInt("DAHL_KEY_PROBE_MAX_TOKENS", dahlDefaultProbeMaxTokens),
 		requestTimeout:    time.Duration(envInt("DAHL_KEY_REQUEST_TIMEOUT_SECONDS", dahlDefaultRequestTimeoutSeconds)) * time.Second,
@@ -759,6 +818,8 @@ func loadDahlMaintenanceConfig() dahlMaintenanceConfig {
 	cfg.maxProbes = max(cfg.maxProbes, 0)
 	cfg.scanConcurrency = min(max(cfg.scanConcurrency, 1), 16)
 	cfg.probeConcurrency = min(max(cfg.probeConcurrency, 1), 8)
+	cfg.scanRatePerMinute = min(max(cfg.scanRatePerMinute, 1), 600)
+	cfg.probeRatePerMin = min(max(cfg.probeRatePerMin, 1), 120)
 	cfg.probeMaxTokens = min(max(cfg.probeMaxTokens, 1), 128)
 	cfg.requestTimeout = max(cfg.requestTimeout, 5*time.Second)
 	cfg.probeTimeout = max(cfg.probeTimeout, 10*time.Second)
